@@ -1972,6 +1972,11 @@ class RecipientBox(ttk.LabelFrame):
     def get(self, cat):
         return list(self.buckets[cat])   # danh sách node
 
+    def clear(self):
+        for c, _ in self.CATS:
+            self.buckets[c] = []
+        self._render_chips()
+
 
 class FileList(ttk.Frame):
     """Danh sách file: nút thêm + listbox + nút bỏ. get() -> [đường dẫn]."""
@@ -1999,6 +2004,10 @@ class FileList(ttk.Frame):
 
     def get(self):
         return list(self.paths)
+
+    def clear(self):
+        self.paths = []
+        self.lb.delete(0, "end")
 
 
 class DocumentSection(ttk.LabelFrame):
@@ -2536,6 +2545,8 @@ class App(tk.Tk):
         ttk.Checkbutton(f, text="Chỉ kiểm tra (không ghi gì) — bật cho lần chạy đầu",
                         variable=self.check_var).pack(anchor="w")
         ttk.Button(f, text="CHẠY", command=self._run).pack(side="left", pady=4)
+        ttk.Button(f, text="Làm mới form", command=self._confirm_reset_form).pack(
+            side="left", padx=(8, 0), pady=4)
         self.readiness_label = ttk.Label(f, text="", font=("", 9))
         self.readiness_label.pack(side="left", padx=(10, 0))
         self._refresh_readiness()   # tự cập nhật định kỳ — xem _refresh_readiness()
@@ -2653,8 +2664,15 @@ class App(tk.Tk):
             self.log("   — Không lấy được luồng nào từ web (giữ nguyên ô trống, tự kiểm tra lại mạng).")
             return
         self.flow.config(values=values)
-        self.flow.set(values[0])
-        self._on_flow_changed()   # tải khung chọn người ngay cho lựa chọn mặc định
+        self._select_default_flow()   # tải khung chọn người ngay cho lựa chọn mặc định
+
+    def _select_default_flow(self):
+        """Chọn lại luồng đầu danh sách hiện có trong combobox (không fetch lại mạng) — dùng
+        khi tải xong lần đầu VÀ khi reset form về trạng thái ban đầu (xem _reset_form)."""
+        values = list(self.flow.cget("values"))
+        if values:
+            self.flow.set(values[0])
+        self._on_flow_changed()
 
     def _apply_work_profiles(self, profiles):
         if not profiles:
@@ -2662,8 +2680,15 @@ class App(tk.Tk):
             return
         self._profile_by_name = {p["name"]: p["fileId"] for p in profiles}
         self.work_profile.config(values=list(self._profile_by_name.keys()))
-        # Mặc định: ưu tiên hồ sơ có chữ "chung" (hồ sơ dùng chung, không gắn 1 vụ việc cụ thể);
-        # nếu không có thì lấy hồ sơ đầu tiên trong danh sách của tài khoản này.
+        self._select_default_work_profile()
+
+    def _select_default_work_profile(self):
+        """Chọn lại hồ sơ công việc mặc định trong danh sách hiện có (không fetch lại mạng):
+        ưu tiên hồ sơ có chữ "chung" (dùng chung, không gắn 1 vụ việc cụ thể); nếu không có thì
+        lấy hồ sơ đầu tiên trong danh sách của tài khoản này."""
+        if not self._profile_by_name:
+            self.work_profile.set("")
+            return
         default_name = next((n for n in self._profile_by_name if "chung" in n.lower()),
                              next(iter(self._profile_by_name)))
         self.work_profile.set(default_name)
@@ -2702,6 +2727,43 @@ class App(tk.Tk):
         only_one = len(self.doc_sections) <= 1
         for ds in self.doc_sections:
             ds.btn_remove.config(state=("disabled" if only_one else "normal"))
+
+    def _confirm_reset_form(self):
+        if messagebox.askyesno(
+                "Làm mới form",
+                "Xóa hết dữ liệu đang nhập (file, văn bản, nơi nhận, nội dung phiếu...) "
+                "để bắt đầu phiếu mới?"):
+            self._reset_form()
+
+    def _reset_form(self):
+        """Đưa form chính về đúng trạng thái ban đầu như lúc _show_main() vừa chạy — gọi tự
+        động sau khi 1 phiếu đã Lưu/Trình THÀNH CÔNG (xem PreviewWindow._on_close), hoặc do
+        người dùng tự bấm "Làm mới form". Không đụng self.session/self.settings/self.store/
+        self.flow_store (trạng thái đăng nhập/sổ dùng chung, không phải dữ liệu theo phiếu),
+        và không fetch lại danh sách luồng/hồ sơ từ mạng — chỉ chọn lại giá trị mặc định trong
+        danh sách đã có sẵn trong bộ nhớ."""
+        self.file_report.set("")
+        self.extra_report.clear()
+
+        for ds in list(self.doc_sections):
+            ds.destroy()
+        self.doc_sections = []
+        self._add_document_section()
+
+        self.report_content.delete("1.0", "end")
+        self.recip.clear()
+
+        self.priority.set("Khẩn")
+        self.security.set("Bình thường")
+        self.auto_stamp_var.set(True)
+        self.check_var.set(False)
+
+        self._select_default_flow()
+        self._select_default_work_profile()
+
+        self.logbox.delete("1.0", "end")
+        self.log("— Đã tự làm mới form, sẵn sàng cho phiếu trình mới —")
+        self._refresh_readiness()
 
     def log(self, msg):
         self.logbox.insert("end", msg + "\n"); self.logbox.see("end"); self.update_idletasks()
@@ -2994,6 +3056,8 @@ class PreviewWindow(tk.Toplevel):
         self._tree_paths = {}       # iid -> (path, kind)
         self._sending = False       # True trong lúc luồng nền đang Lưu/Trình — chặn đóng cửa
                                      # sổ "lặng lẽ" giữa chừng (xem _on_close)
+        self._submitted_ok = False  # True nếu đã Lưu/Trình THÀNH CÔNG ít nhất 1 lần — báo
+                                     # cho _on_close biết cần làm mới form chính hay không
         self._current_phase = None  # phase (xem PIPELINE_PHASES) đang chạy — để biết tô đỏ
                                      # đúng bước nào nếu lỗi
 
@@ -3536,6 +3600,7 @@ class PreviewWindow(tk.Toplevel):
                 self._plog("\n✖ LỖI KHÔNG NGỜ: " + err_text)
                 self.after(0, lambda: self._render_error_banner(err_text))
             else:
+                self._submitted_ok = True   # đã ghi lên hệ thống thật (kể cả banner "ambiguous")
                 self.after(0, lambda: (self.checklist.complete_all(), self._render_result_banner(result)))
             finally:
                 self._sending = False
@@ -3554,6 +3619,7 @@ class PreviewWindow(tk.Toplevel):
             try: self._current_doc.close()
             except Exception: pass
         master = self.master
+        submitted_ok = self._submitted_ok
         self.destroy()
         # Trên macOS, đóng 1 Toplevel không tự trả bàn phím về đúng cửa sổ cha — màn hình chính
         # nhìn vẫn "active" nhưng không nhận phím nữa (vd ô "Nơi nhận" gõ không ăn) cho tới khi
@@ -3563,6 +3629,10 @@ class PreviewWindow(tk.Toplevel):
             master.focus_force()
         except Exception:
             pass
+        if submitted_ok:
+            # Đã gửi thành công (Lưu dự thảo/Trình văn bản) — làm mới form chính để tránh dữ
+            # liệu của phiếu này còn dính lại khi bắt đầu điền phiếu tiếp theo.
+            master._reset_form()
 
 
 if __name__ == "__main__":
