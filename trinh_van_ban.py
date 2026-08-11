@@ -912,17 +912,21 @@ def save_report_draft(s, cfg, report_attach, report_sign, documents, log, sign="
 # gọi lại 1-2 API TRA CỨU (đọc, không ghi gì) để tìm đúng phiếu trình vừa lưu bằng cách khớp
 # content + creatorId + thời điểm tạo — nếu tìm thấy, đó là bằng chứng THẬT (server đã ghi nhận),
 # không phải suy đoán từ mã HTTP.
-def _search_my_report(s, grid=None):
+def _search_my_report(s, grid=None, date_from=None, date_to=None, count=50):
     """Gọi onSearchMyReport.do — `grid="prepareProcessDocument"` = đúng hộp "đang trình/đang xử
     lý" (đã xác nhận qua HAR: trả về gọn, vài dòng); `grid=None` = danh sách chung KHÔNG lọc
     trạng thái (bao gồm cả nháp lẫn đã trình — đây là hộp dùng để tìm thấy cả văn bản còn ở
     thùng nháp). Tham số postData khác nhau giữa 2 biến thể là ĐÚNG theo HAR thật, không phải
-    thiếu sót — mỗi biến thể có bộ tham số riêng của đúng màn hình tương ứng trên web."""
+    thiếu sót — mỗi biến thể có bộ tham số riêng của đúng màn hình tương ứng trên web.
+    `date_from`/`date_to` (chuỗi "YYYY-MM-DD"): mặc định None → giữ đúng hành vi cũ (đầu tháng
+    hiện tại đến hôm nay) — dùng cho verify_report_saved (chỉ cần tìm phiếu vừa lưu trong tháng
+    này); tab "Quản lý Phiếu trình" truyền khoảng ngày người dùng tự chọn."""
     now = datetime.now()
     data = {
-        "searchForm.content": "", "reportSearchForm.createDateFrom": now.replace(day=1).strftime("%Y-%m-%d"),
-        "reportSearchForm.createDateTo": now.strftime("%Y-%m-%d"), "reportSearchForm.content": "",
-        "q": "*", "start": 0, "count": 50, "startval": 0,
+        "searchForm.content": "",
+        "reportSearchForm.createDateFrom": date_from or now.replace(day=1).strftime("%Y-%m-%d"),
+        "reportSearchForm.createDateTo": date_to or now.strftime("%Y-%m-%d"), "reportSearchForm.content": "",
+        "q": "*", "start": 0, "count": count, "startval": 0,
     }
     params = None
     if grid:
@@ -960,30 +964,80 @@ def _match_report(items, content, creator_id, since_dt):
     matches.sort(key=lambda x: x[0], reverse=True)
     return matches[0][1]
 
-def find_current_pending_step(s, report_id, log=lambda *a: None):
-    """Bước đang chờ xử lý (status=1) trong luồng của đúng phiếu trình này — trả về dict có
-    receiveUser/displayPositionName, hoặc None nếu không tra được (không phải lỗi nghiêm trọng,
-    chỉ là chưa hiện được câu 'đang chờ ai')."""
+def fetch_report_process(s, report_id, log=lambda *a: None, count=200):
+    """Toàn bộ các bước (đã qua/đang chờ) trong luồng ký duyệt của 1 phiếu trình — mỗi bước có
+    receiveUser/receiveUserId/receiveRoleId/receiveGroupId/displayPositionName/actionType/
+    processOrder/status (1=đang chờ, 0=đã qua/chưa tới). Trả [] nếu không tra được (không
+    raise — chỉ là chưa hiện được tiến trình, không phải lỗi nghiêm trọng)."""
     try:
         r = s.post(BASE + "/voReport!onSearchReportProcess.do", params={"reportId": report_id},
-                   data={"q": "*", "start": 0, "count": 12, "startval": 0}, timeout=30)
-        items = r.json().get("items") or []
+                   data={"q": "*", "start": 0, "count": count, "startval": 0}, timeout=30)
+        return r.json().get("items") or []
     except Exception as e:
-        log(f"   • Không tra được người đang giữ phiếu trình: {e!r}")
-        return None
+        log(f"   • Không tra được tiến trình ký của phiếu trình: {e!r}")
+        return []
+
+def find_current_pending_step(s, report_id, log=lambda *a: None):
+    """Bước đang chờ xử lý (status=1) — trả về dict có receiveUser/displayPositionName, hoặc
+    None nếu không tra được/không có bước nào đang chờ."""
+    items = fetch_report_process(s, report_id, log, count=12)
     return next((it for it in items if it.get("status") == 1), None)
 
-def find_latest_history_note(s, report_id, log=lambda *a: None):
-    """Dòng mới nhất trong nhật ký hành động của phiếu trình (Trình ký/Hủy trình ký/...) — trả
-    về dict có note/createAt/fullname, hoặc None nếu không tra được."""
+def fetch_report_history(s, report_id, log=lambda *a: None, count=50):
+    """Toàn bộ nhật ký hành động của 1 phiếu trình (Trình ký/Hủy trình ký/...), mới nhất trước —
+    mỗi dòng có note/createAt/fullname/effectType. Trả [] nếu không tra được."""
     try:
         r = s.post(BASE + "/voReport!getReportHistory.do", params={"objectId": report_id},
-                   data={"q": "*", "start": 0, "count": 20, "startval": 0}, timeout=30)
-        items = r.json().get("items") or []
+                   data={"q": "*", "start": 0, "count": count, "startval": 0}, timeout=30)
+        return r.json().get("items") or []
     except Exception as e:
         log(f"   • Không tra được nhật ký phiếu trình: {e!r}")
-        return None
+        return []
+
+def find_latest_history_note(s, report_id, log=lambda *a: None):
+    """Dòng mới nhất trong nhật ký hành động của phiếu trình — trả về dict có
+    note/createAt/fullname, hoặc None nếu không tra được."""
+    items = fetch_report_history(s, report_id, log, count=20)
     return items[0] if items else None
+
+def fetch_report_attachs(s, report_id, log=lambda *a: None):
+    """Danh sách file đính kèm (văn bản dự thảo) của 1 phiếu trình — mỗi item có
+    draftDocumentName/draftDocumentPath/documentAbstract/documentId. Trả [] nếu không tra được."""
+    try:
+        r = s.post(BASE + "/voReport!getAttachs.do",
+                   params={"reportId": report_id, "attachType": "draftSubmission"},
+                   data={"q": "*", "start": 0, "count": 20, "startval": 0}, timeout=30)
+        return r.json().get("items") or []
+    except Exception as e:
+        log(f"   • Không tra được file đính kèm của phiếu trình: {e!r}")
+        return []
+
+def cancel_report(s, report_id, log=lambda *a: None):
+    """Thu hồi (hủy trình ký) 1 phiếu trình đang xử lý. Không có mẫu HAR nào đọc được response
+    của chính onCancelReport.do (Chrome không giữ cache kịp lúc chụp) — áp dụng đúng triết lý
+    'không tin response, verify lại bằng truy vấn đọc' đã dùng cho việc lưu/trình (xem
+    verify_report_saved): sau khi gọi, tra lại getReportHistory và tìm dòng mới nhất có
+    effectType==7 ("Hủy trình ký phiếu trình" — đã xác nhận đúng chữ này qua HAR thật).
+    Trả (ok: bool, note: dict|None) — ok=False không có nghĩa chắc chắn thất bại, chỉ là chưa
+    xác minh được (giống verify_report_saved), KHÔNG raise trừ khi bản thân request lỗi mạng."""
+    tok = reload_token(s, log)
+    log(f"• Thu hồi phiếu trình (reportId={report_id})…")
+    r = s.post(BASE + "/voReport!onCancelReport.do",
+               params={"reportId": report_id, "struts.token.name": "token", "token": tok},
+               data={"dojo.preventCache": now_ms()}, timeout=30)
+    http_log(log, r)
+    if r.status_code != 200:
+        raise PipelineError(f"onCancelReport trả mã {r.status_code}.\n--- Phản hồi ---\n{r.text[:400]}")
+    for delay in VERIFY_RETRY_DELAYS:
+        log(f"   • Chờ {delay}s rồi tra lại lịch sử để xác minh…")
+        time.sleep(delay)
+        items = fetch_report_history(s, report_id, log, count=5)
+        if items and items[0].get("effectType") == 7:
+            log("   ✓ Lịch sử đã có dòng 'Hủy trình ký phiếu trình' — thu hồi thành công.")
+            return True, items[0]
+    log("   ⚠ Đã thử đủ số lần vẫn chưa thấy dòng xác nhận trong lịch sử — không coi là lỗi, "
+        "chỉ là chưa xác minh được (tự kiểm tra lại trên web nếu cần chắc chắn).")
+    return False, None
 
 VERIFY_RETRY_DELAYS = [3, 4, 5, 6]   # giây nghỉ TRƯỚC mỗi lần thử — hệ thống này khá chậm, nên
                                      # thử vài lần cách quãng thay vì tin ngay 1 lần đầu; DỪNG
@@ -2465,7 +2519,15 @@ class App(tk.Tk):
         w, h = min(int(sw * 0.85), 1400), min(int(sh * 0.85), 950)
         self.geometry(f"{w}x{h}")
         self.minsize(480, 360)
-        pad = self._make_scrollable(self.container)
+
+        notebook = ttk.Notebook(self.container)
+        notebook.pack(fill="both", expand=True)
+        compose_tab = ttk.Frame(notebook)
+        manage_tab = ttk.Frame(notebook)
+        notebook.add(compose_tab, text="Soạn văn bản")
+        notebook.add(manage_tab, text="Quản lý Phiếu trình")
+
+        pad = self._make_scrollable(compose_tab)
         ttk.Label(pad, text=f"Đã đăng nhập: {getattr(self, '_logged_user', '')}",
                   foreground="#2e7d32", font=("", 9, "bold")).pack(anchor="w", padx=12, pady=(10, 4))
 
@@ -2559,6 +2621,8 @@ class App(tk.Tk):
             anchor="e", padx=12, pady=(0, 6))
 
         self._fetch_flow_data()   # sau cùng — logbox đã có sẵn để self.log() gọi từ luồng nền
+
+        self._build_manage_reports_tab(manage_tab)
 
     def _pick(self, var):
         p = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf"), ("Tất cả", "*.*")])
@@ -2958,6 +3022,104 @@ class App(tk.Tk):
             return
         PreviewWindow(self, cfg, self.session)
 
+    # ---------- TAB "QUẢN LÝ PHIẾU TRÌNH" ----------
+    MGMT_COLUMNS = (
+        ("date", "Ngày tạo", 130),
+        ("content", "Nội dung", 420),
+        ("holder", "Người đang giữ", 160),
+    )
+
+    def _build_manage_reports_tab(self, parent):
+        top = ttk.Frame(parent); top.pack(fill="x", padx=8, pady=(8, 4))
+        now = datetime.now()
+        self.mgmt_date_from = tk.StringVar(value=now.replace(day=1).strftime("%Y-%m-%d"))
+        self.mgmt_date_to = tk.StringVar(value=now.strftime("%Y-%m-%d"))
+        ttk.Label(top, text="Từ ngày:").pack(side="left")
+        ttk.Entry(top, textvariable=self.mgmt_date_from, width=12).pack(side="left", padx=(2, 8))
+        ttk.Label(top, text="Đến ngày:").pack(side="left")
+        ttk.Entry(top, textvariable=self.mgmt_date_to, width=12).pack(side="left", padx=(2, 8))
+        ttk.Label(top, text="(định dạng NĂM-THÁNG-NGÀY, vd 2026-08-01)", foreground="gray").pack(side="left")
+        ttk.Button(top, text="↻ Làm mới danh sách", command=self._reload_report_lists).pack(side="left", padx=(8, 0))
+
+        sub = ttk.Notebook(parent)
+        sub.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        processing_tab = ttk.Frame(sub)
+        draft_tab = ttk.Frame(sub)
+        sub.add(processing_tab, text="Đang xử lý")
+        sub.add(draft_tab, text="Nháp")
+
+        self.mgmt_trees = {
+            "processing": self._build_report_tree(processing_tab, "processing"),
+            "draft": self._build_report_tree(draft_tab, "draft"),
+        }
+        self.mgmt_items = {"processing": {}, "draft": {}}   # iid -> item dict đầy đủ
+        self._reload_report_lists()
+
+    def _build_report_tree(self, parent, which):
+        wrap = ttk.Frame(parent); wrap.pack(fill="both", expand=True)
+        cols = [c[0] for c in self.MGMT_COLUMNS]
+        tree = ttk.Treeview(wrap, columns=cols, show="headings", height=14)
+        for key, title, width in self.MGMT_COLUMNS:
+            tree.heading(key, text=title)
+            tree.column(key, width=width, anchor="w")
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        tree.bind("<Double-1>", lambda e, w=which: self._open_report_detail(w))
+        return tree
+
+    def _reload_report_lists(self):
+        date_from, date_to = self.mgmt_date_from.get().strip(), self.mgmt_date_to.get().strip()
+        try:
+            datetime.strptime(date_from, "%Y-%m-%d")
+            datetime.strptime(date_to, "%Y-%m-%d")
+        except ValueError:
+            messagebox.showerror("Sai định dạng ngày",
+                                  "Từ ngày/Đến ngày phải theo định dạng NĂM-THÁNG-NGÀY, vd 2026-08-01.")
+            return
+        for which in ("processing", "draft"):
+            self._load_report_list(which, date_from, date_to)
+
+    def _load_report_list(self, which, date_from, date_to):
+        s = self.session
+        def worker():
+            try:
+                if which == "processing":
+                    items = _search_my_report(s, grid="prepareProcessDocument",
+                                               date_from=date_from, date_to=date_to, count=200)
+                else:
+                    items = [it for it in _search_my_report(s, grid=None, date_from=date_from,
+                                                              date_to=date_to, count=200)
+                             if it.get("status") == 0]
+            except Exception as e:
+                self.after(0, lambda: self.log(f"• Không tải được danh sách phiếu trình ({which}): {e!r}"))
+                return
+            self.after(0, lambda: self._apply_report_list(which, items))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_report_list(self, which, items):
+        tree = self.mgmt_trees[which]
+        tree.delete(*tree.get_children())
+        self.mgmt_items[which] = {}
+        for it in items:
+            date = (it.get("createdDate") or "").replace("T", " ")
+            content = (it.get("content") or "").strip()
+            holder = it.get("receiveUser") or ""
+            iid = str(it.get("reportId"))
+            tree.insert("", "end", iid=iid, values=(date, content, holder))
+            self.mgmt_items[which][iid] = it
+
+    def _open_report_detail(self, which):
+        tree = self.mgmt_trees[which]
+        sel = tree.selection()
+        if not sel:
+            return
+        item = self.mgmt_items[which].get(sel[0])
+        if not item:
+            return
+        ReportDetailWindow(self, item, which, self.session)
+
     def _ask_captcha(self, path):
         try:
             import webbrowser
@@ -3022,6 +3184,120 @@ class StepChecklist(ttk.Frame):
         for k in self.order[:idx]:
             self.set_status(k, "done")
         self.set_status(key, "error")
+
+
+class ReportDetailWindow(tk.Toplevel):
+    """Xem chi tiết 1 phiếu trình đã gửi (tab "Quản lý Phiếu trình"): thông tin chung + tiến
+    trình ký + lịch sử + danh sách file đính kèm. Giai đoạn 1 — chỉ xem + Thu hồi (nếu đang ở
+    "Đang xử lý"); chưa xem PDF, chưa Trình lại (xem lý do ở kế hoạch — thiếu dữ liệu để dựng
+    lại đúng code/documentType nếu trình lại)."""
+
+    def __init__(self, master, item, which, session):
+        super().__init__(master)
+        self.item = item
+        self.which = which   # "processing" | "draft"
+        self.session = session
+        self.report_id = item.get("reportId")
+
+        self.title(f"Chi tiết phiếu trình #{self.report_id}")
+        self.geometry("640x620")
+        self.minsize(480, 400)
+
+        top = ttk.Frame(self, padding=(10, 8)); top.pack(fill="x")
+        if which == "processing":
+            self.btn_cancel = ttk.Button(top, text="Thu hồi", command=self._confirm_cancel)
+            self.btn_cancel.pack(side="left")
+        ttk.Button(top, text="Đóng", command=self.destroy).pack(side="left", padx=6)
+
+        self.status_var = tk.StringVar(value="")
+        self.status_label = ttk.Label(self, textvariable=self.status_var, padding=(10, 4),
+                                       wraplength=600, justify="left")
+        self.status_label.pack(fill="x")
+
+        body = ttk.Frame(self, padding=8); body.pack(fill="both", expand=True)
+        self._build_info(body, item)
+        self._build_list_section(body, "Tiến trình ký", "process_list", height=6)
+        self._build_list_section(body, "Lịch sử", "history_list", height=6)
+        self._build_list_section(body, "File đính kèm", "attach_list", height=4)
+
+        self._load_detail()
+
+    def _row(self, parent, label, value):
+        f = ttk.Frame(parent); f.pack(fill="x", pady=1)
+        ttk.Label(f, text=label, width=14, font=("", 9, "bold")).pack(side="left")
+        ttk.Label(f, text=value or "", wraplength=480, justify="left").pack(side="left", fill="x", expand=True)
+
+    def _build_info(self, parent, item):
+        box = ttk.LabelFrame(parent, text="Thông tin", padding=6)
+        box.pack(fill="x", pady=(0, 6))
+        self._row(box, "Nội dung:", item.get("content"))
+        self._row(box, "Người tạo:", item.get("creator"))
+        self._row(box, "Ngày tạo:", (item.get("createdDate") or "").replace("T", " "))
+        self._row(box, "Đơn vị:", item.get("officeName"))
+        self._row(box, "Trạng thái:", item.get("stateName"))
+
+    def _build_list_section(self, parent, title, attr_name, height):
+        box = ttk.LabelFrame(parent, text=title, padding=6)
+        box.pack(fill="both", expand=True, pady=(0, 6))
+        lb = tk.Listbox(box, height=height)
+        lb.pack(fill="both", expand=True)
+        setattr(self, attr_name, lb)
+
+    def _load_detail(self):
+        s, rid = self.session, self.report_id
+        def worker():
+            process = fetch_report_process(s, rid)
+            history = fetch_report_history(s, rid)
+            attachs = fetch_report_attachs(s, rid)
+            self.after(0, lambda: self._apply_detail(process, history, attachs))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_detail(self, process, history, attachs):
+        self.process_list.delete(0, "end")
+        for it in process:
+            mark = " ⏳ đang chờ" if it.get("status") == 1 else ""
+            self.process_list.insert(
+                "end", f"{it.get('processOrder')}. {it.get('displayPositionName')} — "
+                       f"{it.get('receiveUser')}{mark}")
+        self.history_list.delete(0, "end")
+        for it in history:
+            when = (it.get("createAt") or "").replace("T", " ")
+            self.history_list.insert("end", f"{when} — {it.get('fullname')}: {it.get('note')}")
+        self.attach_list.delete(0, "end")
+        for it in attachs:
+            name = it.get("draftDocumentName")
+            if name:
+                self.attach_list.insert("end", name)
+
+    def _confirm_cancel(self):
+        if not messagebox.askyesno(
+                "Thu hồi phiếu trình",
+                f"Thu hồi (hủy trình ký) phiếu trình #{self.report_id}?\n"
+                "Đây là hành động ghi lên hệ thống thật — không thể tự hoàn tác từ chương trình.",
+                parent=self):
+            return
+        self.btn_cancel.config(state="disabled")
+        self.status_var.set("• Đang thu hồi…")
+        s, rid = self.session, self.report_id
+        def worker():
+            try:
+                ok, note = cancel_report(s, rid)
+            except Exception as e:
+                self.after(0, lambda: self._cancel_done(False, repr(e)))
+                return
+            msg = (note or {}).get("note") if ok else "chưa xác minh được — tự kiểm tra lại trên web"
+            self.after(0, lambda: self._cancel_done(ok, msg))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _cancel_done(self, ok, msg):
+        color = "#2e7d32" if ok else "#c62828"
+        prefix = "✔" if ok else "⚠"
+        self.status_var.set(f"{prefix} {msg}")
+        self.status_label.config(foreground=color)
+        self.btn_cancel.config(state="normal")
+        if ok:
+            self.master._reload_report_lists()
+            self.destroy()
 
 
 class PreviewWindow(tk.Toplevel):
