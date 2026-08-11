@@ -1,0 +1,449 @@
+{
+ "enums": {
+  "documentType": {
+   "Báo cáo": "66728",
+   "Biên bản": "66729",
+   "Chỉ thị": "54465",
+   "Chương trình": "54466",
+   "Công điện": "66701",
+   "Công hàm": "54468",
+   "Công văn": "54469",
+   "Đề án": "66887",
+   "Đơn thư": "54471",
+   "Giấy chứng nhận": "66745",
+   "Giấy giới thiệu": "66744",
+   "Giấy mời": "54473",
+   "Hồ sơ": "66522",
+   "Hợp đồng": "66768",
+   "Hướng dẫn": "66767",
+   "Kế hoạch": "54476",
+   "Kết luận": "66741",
+   "Nghị định": "54479",
+   "Nghị quyết": "54480",
+   "Pháp lệnh": "54481",
+   "Phiếu báo": "65395",
+   "Phiếu chuyển": "65394",
+   "Phiếu trình": "54487",
+   "Phúc đáp": "66743",
+   "Quy trình": "66747",
+   "Quyết định": "54482",
+   "Sao y bản chính": "66827",
+   "Thẩm định VBQPPL": "65405",
+   "Thông báo": "54483",
+   "Thông tư": "54484",
+   "Thông tư liên tịch": "54485",
+   "Tờ trình": "66742",
+   "Trả lời, góp ý kiến": "65025",
+   "Ủy quyền": "66746",
+   "Uỷ thác tư pháp": "65415"
+  },
+  "priority": {
+   "Hỏa tốc": "54724",
+   "Thượng khẩn": "54613",
+   "Bình thường": "66731",
+   "Khẩn": "54764"
+  },
+  "security": {
+   "Bình thường": "66726",
+   "Mật": "54459",
+   "Tối mật": "54804",
+   "Tuyệt mật": "54708"
+  }
+ },
+ "templates": {
+  "insertDraft": {
+   "path": "/voPublishDocument!onInsertDraft.do",
+   "query": {
+    "struts.token.name": "token",
+    "token": "DU3P8KGZPIJ54QE4W5IE3JHA8RS3T8DK"
+   },
+   "params": [
+    [
+     "moduleCallThisPage",
+     "reportForm"
+    ],
+    [
+     "publishDocumentCreateForm.publishDocumentId",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.checkDeptId",
+     "false"
+    ],
+    [
+     "copyPublishDocId",
+     ""
+    ],
+    [
+     "backPage",
+     "reportForm"
+    ],
+    [
+     "moduleCallViewPage",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.fileId",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.status",
+     ""
+    ],
+    [
+     "receiveSaveDepartment",
+     "C%E1%BB%A5c%20Qu%E1%BA%A3n%20l%C3%BD%20D%C6%B0%E1%BB%A3c%3BB%E1%BB%99%20Y%20T%E1%BA%BF"
+    ],
+    [
+     "receiveSaveDepartmentId",
+     "210%3B52"
+    ],
+    [
+     "publishDocumentCreateForm.isDigitSignDoc",
+     "1"
+    ],
+    [
+     "publishDocumentCreateForm.publishDocType",
+     "0"
+    ],
+    [
+     "publishDocumentCreateForm.publishOfficeId",
+     "273"
+    ],
+    [
+     "publishDocumentCreateForm.publishOfficeName",
+     "Ph%C3%B2ng%20Qu%E1%BA%A3n%20l%C3%BD%20ch%E1%BA%A5t%20l%C6%B0%E1%BB%A3ng%20thu%E1%BB%91c"
+    ],
+    [
+     "publishDocumentCreateForm.createDatePublish",
+     "2026-07-18"
+    ],
+    [
+     "publishDocumentCreateForm.editorId",
+     "500013302"
+    ],
+    [
+     "publishDocumentCreateForm.editorName",
+     "Nguy%E1%BB%85n%20V%C5%A9%20H%C3%B9ng"
+    ],
+    [
+     "publishDocumentCreateForm.typeOfDoc",
+     "0"
+    ],
+    [
+     "publishDocumentCreateForm.documentLevel",
+     "2"
+    ],
+    [
+     "publishDocumentCreateForm.signId",
+     "-1"
+    ],
+    [
+     "publishDocumentCreateForm.signer",
+     "--Ch%E1%BB%8Dn--"
+    ],
+    [
+     "publishDocumentCreateForm.position",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.initialId",
+     "-1"
+    ],
+    [
+     "publishDocumentCreateForm.initialName",
+     "--Ch%E1%BB%8Dn--"
+    ],
+    [
+     "publishDocumentCreateForm.approveId",
+     "-1"
+    ],
+    [
+     "publishDocumentCreateForm.approveName",
+     "--Ch%E1%BB%8Dn--"
+    ],
+    [
+     "publishDocumentCreateForm.approveDate",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.documentTypeId",
+     "54469"
+    ],
+    [
+     "publishDocumentCreateForm.documentType",
+     "C%C3%B4ng%20v%C4%83n"
+    ],
+    [
+     "publishDocumentCreateForm.code",
+     "QLD-CL"
+    ],
+    [
+     "publishDocumentCreateForm.documentAbstract",
+     "n%E1%BB%99i%20dung%20phi%E1%BA%BFu%20tr%C3%ACnh%201"
+    ],
+    [
+     "publishDocumentCreateForm.numberOfPage",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.deadline",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.securityTypeId",
+     "66726"
+    ],
+    [
+     "publishDocumentCreateForm.securityType",
+     "B%C3%ACnh%20th%C6%B0%E1%BB%9Dng"
+    ],
+    [
+     "publishDocumentCreateForm.priorityId",
+     "54764"
+    ],
+    [
+     "publishDocumentCreateForm.priority",
+     "Kh%E1%BA%A9n"
+    ],
+    [
+     "publishDocumentCreateForm.isReply",
+     "0"
+    ],
+    [
+     "publishDocumentCreateForm.isLaw",
+     "0"
+    ],
+    [
+     "publishDocumentCreateForm.receiveDocCode",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.receiveDocId",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.receiveDocNumber",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.evictReason",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.replaceReason",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.receiveInside",
+     "C%E1%BB%A5c%20B%C3%A0%20m%E1%BA%B9%20v%C3%A0%20Tr%E1%BA%BB%20em"
+    ],
+    [
+     "publishDocumentCreateForm.receiveInsideId",
+     "500008860"
+    ],
+    [
+     "publishDocumentCreateForm.receiveEdoc",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.receiveEdocId",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.receiveOutside",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.receiveOutsideId",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.receiveReport",
+     "Nguy%E1%BB%85n%20Tri%20Th%E1%BB%A9c"
+    ],
+    [
+     "publishDocumentCreateForm.receiveReportId",
+     "52_500012803"
+    ],
+    [
+     "publishDocumentCreateForm.receiveToKnow",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.receiveToKnowId",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.receiveSaveDepartment",
+     "C%E1%BB%A5c%20Qu%E1%BA%A3n%20l%C3%BD%20D%C6%B0%E1%BB%A3c%3BB%E1%BB%99%20Y%20T%E1%BA%BF"
+    ],
+    [
+     "publishDocumentCreateForm.receiveSaveDepartmentId",
+     "210%3B52"
+    ],
+    [
+     "checkboxuploadReportFile",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.attachReportId",
+     ""
+    ],
+    [
+     "cbx_sign_",
+     "1"
+    ],
+    [
+     "checkboxuploadDraftFile",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.attachDraftId",
+     "523201485"
+    ],
+    [
+     "publishDocumentCreateForm.attachSaveOriginalId",
+     ""
+    ],
+    [
+     "publishDocumentCreateForm.signRequere",
+     "523201485"
+    ],
+    [
+     "publishDocumentCreateForm.notPublishOnPortal",
+     "1"
+    ],
+    [
+     "dojo.preventCache",
+     "1784366767907"
+    ]
+   ]
+  },
+  "saveReport": {
+   "path": "/voReport!onUpdate.do",
+   "query": {
+    "struts.token.name": "token",
+    "token": "MAFY9RQOQISUPO8SQNQ1EOLQ6KJZBK4U",
+    "flowId": "24682",
+    "fileId": "500092130",
+    "receiveRoleId": "0",
+    "personAsign": "0",
+    "myJsonString": "[{\"deptId\":273,\"userId\":2434,\"roleId\":4065,\"actionType\":1,\"nodeId\":500033422,\"order\":1,\"roleName\":\"VHLGsOG7n25nIHBow7JuZw==\",\"fullName\":\"Tmd1eeG7hW4gVsSDbiBWacOqbg==\",\"deptName\":\"UGjDsm5nIFF14bqjbiBsw70gY2jhuqV0IGzGsOG7o25nIHRodeG7kWM=\"},{\"deptId\":210,\"userId\":500002580,\"roleId\":4133,\"actionType\":2,\"nodeId\":500033423,\"order\":2,\"roleName\":\"VsSDbiB0aMawIMSRxqFuIHbhu4s=\",\"fullName\":\"VsSDbiB0aMawIEPhu6VjIFF14bqjbiBsw70gZMaw4bujYw==\",\"deptName\":\"Q+G7pWMgUXXhuqNuIGzDvSBExrDhu6Nj\"},{\"deptId\":210,\"userId\":500002620,\"roleId\":4052,\"actionType\":4,\"nodeId\":500033424,\"order\":3,\"roleName\":\"UGjDsyBD4bulYyB0csaw4bufbmc=\",\"fullName\":\"VOG6oSBN4bqhbmggSMO5bmc=\",\"deptName\":\"Q+G7pWMgUXXhuqNuIGzDvSBExrDhu6Nj\"},{\"deptId\":210,\"userId\":500002580,\"roleId\":4133,\"actionType\":3,\"nodeId\":500033425,\"order\":4,\"roleName\":\"VsSDbiB0aMawIMSRxqFuIHbhu4s=\",\"fullName\":\"VsSDbiB0aMawIEPhu6VjIFF14bqjbiBsw70gZMaw4bujYw==\",\"deptName\":\"Q+G7pWMgUXXhuqNuIGzDvSBExrDhu6Nj\"}]",
+    "actionType": "action",
+    "sign": "0"
+   },
+   "params": [
+    [
+     "reportForm.reportId",
+     ""
+    ],
+    [
+     "reportForm.relatedReportId",
+     ""
+    ],
+    [
+     "reportForm.reportType",
+     "1"
+    ],
+    [
+     "reportForm.officeName",
+     "C%E1%BB%A5c%20Qu%E1%BA%A3n%20l%C3%BD%20D%C6%B0%E1%BB%A3c"
+    ],
+    [
+     "reportForm.officeId",
+     "210"
+    ],
+    [
+     "reportForm.creator",
+     "Nguy%E1%BB%85n%20V%C5%A9%20H%C3%B9ng"
+    ],
+    [
+     "reportForm.creatorId",
+     "500013302"
+    ],
+    [
+     "reportForm.editorDate",
+     "2026-07-18"
+    ],
+    [
+     "reportForm.stateId",
+     "66731"
+    ],
+    [
+     "reportForm.stateName",
+     "B%C3%ACnh%20th%C6%B0%E1%BB%9Dng"
+    ],
+    [
+     "reportForm.content",
+     "n%E1%BB%99i%20dung%20phi%E1%BA%BFu%20tr%C3%ACnh%201"
+    ],
+    [
+     "cbx_sign_1",
+     "1"
+    ],
+    [
+     "checkboxuploadReportFormFile",
+     ""
+    ],
+    [
+     "reportForm.attachId",
+     "523201483"
+    ],
+    [
+     "reportForm.signRequere",
+     "523201483"
+    ],
+    [
+     "reportForm.profileFlowAsignId",
+     "500092130"
+    ],
+    [
+     "reportForm.profileFlowAsign",
+     "G18.019.2024.1597.THHC.hungnv1.qld%20-%20TR%C3%8CNH%20BAN%20H%C3%80NH"
+    ],
+    [
+     "draftDocumentGridForm%5B0%5D.publishDocumentId",
+     "501424869"
+    ],
+    [
+     "draftDocumentGridForm%5B0%5D.createDate",
+     "2026-07-18T16%3A26%3A08"
+    ],
+    [
+     "draftDocumentGridForm%5B0%5D.code",
+     "QLD-CL"
+    ],
+    [
+     "draftDocumentGridForm%5B0%5D.documentType",
+     "C%C3%B4ng%20v%C4%83n"
+    ],
+    [
+     "draftDocumentGridForm%5B0%5D.documentAbstract",
+     "n%E1%BB%99i%20dung%20phi%E1%BA%BFu%20tr%C3%ACnh%201"
+    ],
+    [
+     "draftDocumentGridForm%5B0%5D.signer",
+     ""
+    ],
+    [
+     "draftDocumentGridForm%5B0%5D.status",
+     "0"
+    ],
+    [
+     "draftDocumentGridForm%5B0%5D.signId",
+     "-1"
+    ],
+    [
+     "draftDocumentGridForm%5B0%5D.position",
+     ""
+    ],
+    [
+     "dojo.preventCache",
+     "1784366773151"
+    ]
+   ]
+  }
+ },
+ "note": "Khuôn mẫu bắt từ HAR thật. saveReport = onUpdate với sign=0 (lưu nháp)."
+}
