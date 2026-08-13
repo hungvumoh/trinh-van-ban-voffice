@@ -11,7 +11,7 @@ Cần: Python 3.9+, thư viện requests  ->  pip install requests
 Đặt 3 file cùng thư mục: trinh_van_ban.py, du_lieu.json, noi_nhan.json
 Chạy:  python trinh_van_ban.py
 """
-import base64, json, os, re, subprocess, sys, tempfile, time, threading, unicodedata
+import atexit, base64, json, os, re, shutil, subprocess, sys, tempfile, time, threading, unicodedata
 from html import unescape as html_unescape   # tên "html" đã dùng làm biến cục bộ khắp file (nội dung
                                               # trang) — import tách riêng để khỏi đụng nhau
 from contextlib import contextmanager
@@ -427,10 +427,23 @@ def cas_login(s, username, password, log, ask_captcha):
     raise PipelineError("Đăng nhập thất bại (sai mật khẩu hoặc captcha).")
 
 # ---------- Các bước ----------
-def open_forms(s, log):
-    """Mở phiếu trình mới + form văn bản; trả về HTML form (chứa URL upload)."""
-    log("• Mở phiếu trình mới (prepareInsert)…")
-    s.post(BASE + "/voReport!prepareInsert.do", data={"dojo.preventCache": now_ms()}, timeout=30)
+def open_forms(s, log, report_id=None):
+    """Mở phiếu trình mới + form văn bản; trả về (html_form_van_ban, html_form_phieu_trinh_sua).
+    `report_id`: có giá trị khi SỬA 1 phiếu trình đã có — mở đúng form Sửa (`prepareUpdate.do`)
+    thay vì Tạo mới (`prepareInsert.do`) để lấy URL upload RIÊNG cho file phiếu trình lần sửa
+    này — xác nhận qua HAR thật ('thay file.har'): khi sửa phiếu và đổi file phiếu trình, trình
+    duyệt gọi `voReport!prepareUpdate.do?reportId=<id>` (KHÔNG gọi `prepareInsert.do`) ngay
+    trước lần upload file phiếu trình mới; phần tử thứ 2 trả về (None nếu tạo mới) — nơi gọi tự
+    tách URL upload riêng cho phiếu trình từ đó thay vì từ form tạo mới."""
+    report_edit_html = None
+    if report_id:
+        log(f"• Mở phiếu trình #{report_id} để sửa (prepareUpdate)…")
+        r_edit = s.post(BASE + "/voReport!prepareUpdate.do", params={"reportId": report_id},
+                         data={"dojo.preventCache": now_ms()}, timeout=30)
+        report_edit_html = r_edit.text
+    else:
+        log("• Mở phiếu trình mới (prepareInsert)…")
+        s.post(BASE + "/voReport!prepareInsert.do", data={"dojo.preventCache": now_ms()}, timeout=30)
     log("• Mở form soạn văn bản (prepareCreateDraft)…")
     r = s.post(BASE + "/voPublishDocument!prepareCreateDraft.do",
                data={"dojo.preventCache": now_ms()}, timeout=30)
@@ -439,7 +452,7 @@ def open_forms(s, log):
     if "login" in r.url.lower() or "passport" in r.url.lower() or len(html) < 2000:
         raise PipelineError("Phiên có vẻ đã hết hạn (bị đẩy về đăng nhập). "
                             "Đăng nhập lại trên trình duyệt, lấy cookie mới rồi thử lại.")
-    return html
+    return html, report_edit_html
 
 def extract_upload_urls(html):
     """Lấy URL upload (kèm id mã hóa) cho từng ô kẹp file."""
@@ -757,10 +770,13 @@ def resolve_nodes(s, nodes, tree, log):
         names.append(nd["name"].strip()); ids.append(i)
     return ";".join(names), ";".join(ids)
 
-def save_document(s, cfg, doc, draft_attach, draft_sign, log):
+def save_document(s, cfg, doc, draft_attach, draft_sign, log, existing_pid=None):
     """Lưu 1 văn bản dự thảo (onInsertDraft). `doc` mang loại VB/số ký hiệu/trích yếu RIÊNG
     của văn bản này (mỗi văn bản trong 1 phiếu trình có thể khác loại/khác số/khác trích yếu —
-    chỉ nơi nhận/độ khẩn/độ mật/luồng trình là dùng chung, lấy từ cfg). Trả về publishDocumentId."""
+    chỉ nơi nhận/độ khẩn/độ mật/luồng trình là dùng chung, lấy từ cfg). Trả về publishDocumentId.
+    `existing_pid`: có giá trị khi SỬA 1 văn bản đã có (thay vì tạo mới) — server hiểu là cập
+    nhật đúng văn bản đó (xác nhận qua HAR: request giống hệt tạo mới, chỉ khác đúng field
+    publishDocumentId mang ID cũ thay vì để trống)."""
     params = decode_params([list(p) for p in TPL["insertDraft"]["params"]])
     P = "publishDocumentCreateForm."
     dt = ENUMS["documentType"][doc["doc_type"]]
@@ -776,7 +792,7 @@ def save_document(s, cfg, doc, draft_attach, draft_sign, log):
         set_param(params, P + "securityType", cfg["security"])
     set_param(params, P + "attachDraftId", draft_attach)   # dự thảo + tài liệu gửi kèm (nối ';')
     set_param(params, P + "signRequere", draft_sign)       # chỉ dự thảo cần ký
-    set_param(params, P + "publishDocumentId", "")
+    set_param(params, P + "publishDocumentId", existing_pid or "")
     set_param(params, P + "status", "")
     set_param(params, P + "createDatePublish", datetime.now().strftime("%Y-%m-%d"))
     # Nơi nhận: xóa hết rồi đặt lại theo lựa chọn
@@ -827,14 +843,16 @@ def flow_items_for_cfg(s, cfg, log):
         return []
     return fetch_flow_nodes(s, flow_id, cfg.get("report_content", ""), log)
 
-def save_report_draft(s, cfg, report_attach, report_sign, documents, log, sign="0"):
+def save_report_draft(s, cfg, report_attach, report_sign, documents, log, sign="0", report_id=None):
     """Lưu phiếu trình (onUpdate). `documents`: list các văn bản đã lưu (mỗi dict có sẵn '_pid'
     = publishDocumentId từ save_document()) — ghi thành nhiều dòng draftDocumentGridForm[0],
     [1], ... (giống hệt cách trang web tự thêm dòng khi bạn bấm "Thêm văn bản" nhiều lần trong
     1 phiếu trình — xác nhận qua file HAR).
     `sign`: "0" = LƯU NHÁP (mặc định, an toàn — không đi vào luồng ký duyệt), "1" = TRÌNH THẬT
     (văn bản bắt đầu đi vào luồng ký duyệt) — xác nhận qua HAR: request giống hệt lưu nháp,
-    chỉ khác đúng tham số này, không có trường nào khác cần thêm."""
+    chỉ khác đúng tham số này, không có trường nào khác cần thêm.
+    `report_id`: có giá trị khi SỬA 1 phiếu trình đã có (thay vì tạo mới) — server hiểu là cập
+    nhật đúng phiếu đó (xác nhận qua HAR: cùng field reportId, chỉ khác để trống hay không)."""
     q = dict(TPL["saveReport"]["query"])
     q = {unquote(k): unquote(v) for k, v in q.items()}
 
@@ -879,7 +897,7 @@ def save_report_draft(s, cfg, report_attach, report_sign, documents, log, sign="
     set_param(params, "reportForm.content", cfg["report_content"])
     set_param(params, "reportForm.attachId", report_attach)   # phiếu trình + tài liệu không gửi (nối ';')
     set_param(params, "reportForm.signRequere", report_sign)  # chỉ phiếu trình cần ký
-    set_param(params, "reportForm.reportId", "")
+    set_param(params, "reportForm.reportId", report_id or "")
     set_param(params, "reportForm.editorDate", datetime.now().strftime("%Y-%m-%d"))
     now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     for i, doc in enumerate(documents):
@@ -937,6 +955,24 @@ def _search_my_report(s, grid=None, date_from=None, date_to=None, count=50):
         data["reportSearchForm.stateId"] = "-1"
         data["reportSearchForm.status"] = "-1"
     r = s.post(BASE + "/voReport!onSearchMyReport.do", params=params, data=data, timeout=30)
+    return r.json().get("items") or []
+
+def _search_processed_report(s, date_from=None, date_to=None, count=50):
+    """Danh sách "Hoàn thành" — gọi ENDPOINT KHÁC (`voReport!onSearchReport.do?grid=processed`,
+    không phải onSearchMyReport.do như 2 hộp Đang xử lý/Nháp) — xác nhận qua HAR riêng, đúng bộ
+    tham số postData của màn hình "Hoàn thành" trên web (có thêm reportSearchForm.creator/
+    reportNumber/finishDateFrom/To/officeId mà 2 hộp kia không có). Mỗi item trả về có thêm
+    `finishDate` (ngày hoàn thành) và `status == 3`."""
+    now = datetime.now()
+    data = {
+        "searchForm.content": "", "reportSearchForm.creator": "", "reportSearchForm.reportNumber": "",
+        "reportSearchForm.createDateFrom": date_from or now.replace(day=1).strftime("%Y-%m-%d"),
+        "reportSearchForm.createDateTo": date_to or now.strftime("%Y-%m-%d"),
+        "reportSearchForm.finishDateFrom": "", "reportSearchForm.finishDateTo": "",
+        "reportSearchForm.reportOfficeNumber": "", "reportSearchForm.officeId": "",
+        "reportSearchForm.content": "", "q": "*", "start": 0, "count": count, "startval": 0,
+    }
+    r = s.post(BASE + "/voReport!onSearchReport.do", params={"grid": "processed"}, data=data, timeout=30)
     return r.json().get("items") or []
 
 def _match_report(items, content, creator_id, since_dt):
@@ -1011,6 +1047,81 @@ def fetch_report_attachs(s, report_id, log=lambda *a: None):
     except Exception as e:
         log(f"   • Không tra được file đính kèm của phiếu trình: {e!r}")
         return []
+
+def fetch_document_of_report(s, report_id, log=lambda *a: None):
+    """Chi tiết từng văn bản (Loại VB/Số ký hiệu/Trích yếu/Nơi nhận/Độ khẩn-mật/Người ký) của 1
+    phiếu trình đã có — nguồn duy nhất cho các field này khi sửa nháp (không đọc được từ file
+    PDF). Trả [] nếu không tra được."""
+    try:
+        r = s.post(BASE + "/voPublishDocument!onSearchDocumentOfReport.do",
+                   params={"reportId": report_id},
+                   data={"q": "*", "start": 0, "count": 200, "startval": 0}, timeout=30)
+        return r.json().get("items") or []
+    except Exception as e:
+        log(f"   • Không tra được chi tiết văn bản của phiếu trình: {e!r}")
+        return []
+
+def fetch_edit_draft_upload_url(s, publish_document_id, log=lambda *a: None):
+    """Mở form Sửa 1 văn bản đã có (onEditDraft) để lấy URL upload riêng cho lần sửa này — tái
+    dùng đúng extract_upload_urls() đã có (dùng cho form tạo mới), chỉ khác nguồn HTML."""
+    r = s.post(BASE + "/voPublishDocument!onEditDraft.do",
+               params={"publishDocumentId": publish_document_id, "moduleCall": "reportForm"},
+               data={"dojo.preventCache": now_ms()}, timeout=30)
+    urls = extract_upload_urls(r.text)
+    if not urls:
+        raise PipelineError(f"Không thấy URL upload trong form Sửa (publishDocumentId={publish_document_id}).")
+    return urls.get("uploadDraftFile") or list(urls.values())[-1]
+
+def fetch_draft_attach_tokens(s, publish_document_id, log=lambda *a: None):
+    """Token tải file cho từng file đính kèm của 1 văn bản đã có — xác nhận qua HAR thật ('har
+    đính kèm để báo cáo.har'): gọi thẳng draftDocumentPath (đường dẫn thô trả về từ
+    fetch_report_attachs/getAttachs.do) để tải bị chặn 403 — server chỉ cho tải qua đúng cặp
+    attachId + token lấy từ endpoint này (`uploadiframe!getAttachFile.do`, objectType=2 =
+    'uploadDraftFile'), rồi ghép vào `uploadiframe!openFile.do?token=...&attachId=...` (cùng
+    cơ chế đã dùng để tải file phiếu trình qua attachPathIcons — CÓ hoạt động, đã tự xác nhận).
+    Trả về dict {attachId (khớp draftDocumentId của getAttachs.do): {"name", "token"}}."""
+    try:
+        r = s.post(BASE + "/uploadiframe!getAttachFile.do",
+                   params={"objectId": publish_document_id, "objectType": 2, "id": "uploadDraftFile"},
+                   data={}, timeout=30)
+        items = r.json().get("items") or []
+        if len(items) < 3:
+            return {}
+        ids, names, tokens = items[0], items[1], items[2]
+        return {aid: {"name": name, "token": token} for aid, name, token in zip(ids, names, tokens)}
+    except Exception as e:
+        log(f"   • Không tra được token tải file văn bản (publishDocumentId={publish_document_id}): {e!r}")
+        return {}
+
+def download_attach(s, url_or_path, dest_path, log=lambda *a: None):
+    """Tải 1 file đính kèm đã có trên hệ thống về máy (dùng session đã đăng nhập) — cho tính
+    năng Sửa nháp tự điền lại file cũ. `url_or_path` là URL đầy đủ (từ attachPathIcons hoặc từ
+    fetch_draft_attach_tokens() + uploadiframe!openFile.do — xem 2 nơi gọi)."""
+    url = url_or_path if url_or_path.startswith("http") else BASE + url_or_path
+    r = s.get(url, timeout=60)
+    if r.status_code != 200 or not r.content:
+        raise PipelineError(f"Tải file thất bại (status={r.status_code}): {url}")
+    with open(dest_path, "wb") as f:
+        f.write(r.content)
+    log(f"   → Đã tải file cũ về: {dest_path}")
+    return dest_path
+
+def remove_attach_file(s, attach_id, log=lambda *a: None):
+    """Xoá 1 file đính kèm CŨ khỏi hệ thống (`uploadiframe!removeFile.do`) — BẮT BUỘC khi Sửa 1
+    văn bản/phiếu trình đã có file và upload lại: xác nhận qua 2 HAR thật ('thay file.har',
+    'bấm trình đi.har') — trình duyệt luôn gọi removeFile cho ID cũ ngay trước khi gắn file mới.
+    Nếu bỏ qua bước này: `attachDraftId` là danh sách nối ';' (xem save_document) — file mới
+    upload lại chỉ CỘNG THÊM vào chứ không thay thế, càng Sửa nhiều lần văn bản càng tích file
+    trùng lặp. CHỈ gọi ở nhánh ghi thật (sau khi check_only đã return) — đây là hành động XOÁ
+    THẬT trên hệ thống, không phải bước đọc. Best-effort: lỗi thì log rõ để tự kiểm tra lại trên
+    web, không raise (1 file xoá lỗi không nên chặn toàn bộ phiếu)."""
+    try:
+        s.post(BASE + "/uploadiframe!removeFile.do", params={"attachId": attach_id},
+               data={"dojo.preventCache": now_ms()}, timeout=30)
+        log(f"   → Đã xoá file cũ (attachId={attach_id}) trước khi thay bằng file mới.")
+    except Exception as e:
+        log(f"   • Không xoá được file cũ (attachId={attach_id}): {e!r} — có thể còn sót file "
+            "trùng lặp, tự kiểm tra lại trên web.")
 
 def cancel_report(s, report_id, log=lambda *a: None):
     """Thu hồi (hủy trình ký) 1 phiếu trình đang xử lý. Không có mẫu HAR nào đọc được response
@@ -1141,8 +1252,9 @@ def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
         return n[0]
 
     phase_cb("prepare")
+    report_id = cfg.get("report_id")
     with step(log, nn(), total, "Mở 2 form (phiếu trình + văn bản)"):
-        html = open_forms(s, log)
+        html, report_edit_html = open_forms(s, log, report_id=report_id)
 
     with step(log, nn(), total, "Tìm ô kẹp file trong form"):
         urls = extract_upload_urls(html)
@@ -1151,6 +1263,14 @@ def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
             raise PipelineError("Không thấy URL upload trong form.")
         url_report = urls.get("uploadReportFile") or list(urls.values())[0]
         url_draft  = urls.get("uploadDraftFile")  or list(urls.values())[-1]
+        if report_id:
+            # Sửa phiếu trình đã có — URL upload của file phiếu trình phải lấy từ form Sửa
+            # (report_edit_html), không phải từ form tạo mới ở trên (xem open_forms()).
+            edit_urls = extract_upload_urls(report_edit_html or "")
+            if not edit_urls:
+                raise PipelineError(
+                    f"Không thấy URL upload trong form Sửa phiếu trình (reportId={report_id}).")
+            url_report = edit_urls.get("uploadReportFile") or list(edit_urls.values())[0]
 
     for doc in documents:
         main = doc.get("file_draft_main")
@@ -1191,7 +1311,12 @@ def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
     for i, doc in enumerate(documents):
         label = f"Upload Văn bản {i+1}/{n_docs} ({len(doc['_files'])} file) → lấy ID"
         with step(log, nn(), total, label):
-            attach, sign = upload_many(s, url_draft, doc["_files"], log)
+            # Sửa 1 văn bản đã có (existing_pid) — dùng URL upload RIÊNG của form Sửa
+            # (onEditDraft), không phải URL upload của form tạo mới (url_draft) — xác nhận
+            # qua HAR: web mở lại đúng dialog Sửa để lấy URL này trước khi upload file mới.
+            existing_pid = doc.get("_existing_pid")
+            doc_upload_url = fetch_edit_draft_upload_url(s, existing_pid, log) if existing_pid else url_draft
+            attach, sign = upload_many(s, doc_upload_url, doc["_files"], log)
             doc["_attach"], doc["_sign"] = attach, sign
             log(f"   attachDraftId={attach}  (ký: {sign})")
 
@@ -1204,7 +1329,15 @@ def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
     phase_cb("save_docs")
     for i, doc in enumerate(documents):
         with step(log, nn(), total, f"Xin token + LƯU văn bản {i+1}/{n_docs} (onInsertDraft)"):
-            doc["_pid"] = save_document(s, cfg, doc, doc["_attach"], doc["_sign"], log)
+            # Sửa văn bản đã có (existing_pid) — xoá file CŨ trước khi lưu, nếu không file mới
+            # (vừa upload lại ở bước trên) sẽ CỘNG THÊM vào attachDraftId chứ không thay thế,
+            # càng Sửa/Trình lại nhiều lần văn bản càng tích file trùng lặp (xác nhận qua HAR
+            # thật — xem remove_attach_file). CHỈ chạy ở đây (sau khi check_only đã return phía
+            # trên) — đây là bước ghi/xoá thật.
+            for old_id in doc.get("_existing_attach_ids") or []:
+                remove_attach_file(s, old_id, log)
+            doc["_pid"] = save_document(s, cfg, doc, doc["_attach"], doc["_sign"], log,
+                                         existing_pid=doc.get("_existing_pid"))
 
     submit_sign = cfg.get("submit_sign", "0")
     step_label = "Xin token + TRÌNH phiếu trình (onUpdate sign=1)" if submit_sign == "1" \
@@ -1213,7 +1346,13 @@ def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
     since_dt = datetime.now()   # mốc thời gian TRƯỚC lúc gọi onUpdate — dùng để lọc khi dò lại
                                 # reportId ở bước xác minh (loại bỏ phiếu trình cũ trùng nội dung)
     with step(log, nn(), total, step_label):
-        save_report_draft(s, cfg, report_attach, report_sign, documents, log, sign=submit_sign)
+        # Sửa phiếu trình đã có (report_id) — xoá file CŨ của chính phiếu trình trước khi lưu,
+        # cùng lý do với file văn bản ở trên (reportForm.attachId cũng là danh sách nối ';').
+        if cfg.get("report_id"):
+            for old_id in cfg.get("report_existing_attach_ids") or []:
+                remove_attach_file(s, old_id, log)
+        save_report_draft(s, cfg, report_attach, report_sign, documents, log, sign=submit_sign,
+                           report_id=cfg.get("report_id"))
 
     phase_cb("verify")
     with step(log, nn(), total, "Xác minh lại với hệ thống (đọc lại, không ghi gì)"):
@@ -2186,6 +2325,8 @@ class DocumentSection(ttk.LabelFrame):
             "abstract": self.abstract.get("1.0", "end-1c"),
             "file_draft_main": self.file_draft.get(),
             "files_draft_extra": self.extra.get(),
+            "_existing_pid": getattr(self, "_existing_pid", None),
+            "_existing_attach_ids": getattr(self, "_existing_attach_ids", None),
         }
 
 
@@ -2418,6 +2559,8 @@ class App(tk.Tk):
         self.flow_store = load_flow_store()
         self.file_report = tk.StringVar()
         self.doc_sections = []
+        self._edit_tmpdirs = []   # thư mục tạm chứa file tải về khi "Sửa" — dọn ở _reset_form()/thoát
+        atexit.register(self._cleanup_edit_tmpdirs)
         self.container = ttk.Frame(self); self.container.pack(fill="both", expand=True)
         self._show_login()
 
@@ -2526,6 +2669,8 @@ class App(tk.Tk):
         manage_tab = ttk.Frame(notebook)
         notebook.add(compose_tab, text="Soạn văn bản")
         notebook.add(manage_tab, text="Quản lý Phiếu trình")
+        # Giữ lại để "Sửa" (xem _edit_in_compose) tự chuyển đúng sang tab này.
+        self._notebook, self._compose_tab = notebook, compose_tab
 
         pad = self._make_scrollable(compose_tab)
         ttk.Label(pad, text=f"Đã đăng nhập: {getattr(self, '_logged_user', '')}",
@@ -2806,6 +2951,9 @@ class App(tk.Tk):
         self.flow_store (trạng thái đăng nhập/sổ dùng chung, không phải dữ liệu theo phiếu),
         và không fetch lại danh sách luồng/hồ sơ từ mạng — chỉ chọn lại giá trị mặc định trong
         danh sách đã có sẵn trong bộ nhớ."""
+        self._editing_report_id = None   # xoá dấu "đang sửa phiếu X" (xem _edit_in_compose)
+        self._editing_report_existing_attach_ids = None
+        self._cleanup_edit_tmpdirs()
         self.file_report.set("")
         self.extra_report.clear()
 
@@ -2829,6 +2977,14 @@ class App(tk.Tk):
         self.log("— Đã tự làm mới form, sẵn sàng cho phiếu trình mới —")
         self._refresh_readiness()
 
+    def _cleanup_edit_tmpdirs(self):
+        """Xoá các thư mục tạm chứa file tải về lúc "Sửa" (xem _edit_in_compose) — gọi khi làm
+        mới form (dữ liệu cũ không còn cần) và khi thoát chương trình (atexit), tránh để lại rác
+        chứa văn bản đã tải về vô thời hạn trong thư mục tạm hệ điều hành."""
+        for d in self._edit_tmpdirs:
+            shutil.rmtree(d, ignore_errors=True)
+        self._edit_tmpdirs = []
+
     def log(self, msg):
         self.logbox.insert("end", msg + "\n"); self.logbox.see("end"); self.update_idletasks()
 
@@ -2851,6 +3007,8 @@ class App(tk.Tk):
             "file_report_main": self.file_report.get(),
             "files_report_extra": self.extra_report.get(),
             "documents": [ds.get() for ds in self.doc_sections],
+            "report_id": getattr(self, "_editing_report_id", None),
+            "report_existing_attach_ids": getattr(self, "_editing_report_existing_attach_ids", None),
         }
 
     def _refresh_readiness(self):
@@ -3023,37 +3181,41 @@ class App(tk.Tk):
         PreviewWindow(self, cfg, self.session)
 
     # ---------- TAB "QUẢN LÝ PHIẾU TRÌNH" ----------
+    MGMT_TABS = (
+        ("processing", "Đang xử lý"),
+        ("draft", "Nháp"),
+        ("processed", "Hoàn thành"),
+    )
     MGMT_COLUMNS = (
-        ("date", "Ngày tạo", 130),
-        ("content", "Nội dung", 420),
-        ("holder", "Người đang giữ", 160),
+        ("date", "Ngày tạo", 120),
+        ("content", "Nội dung", 370),
+        ("holder", "Người đang giữ", 140),
+        ("finish", "Ngày hoàn thành", 120),
     )
 
     def _build_manage_reports_tab(self, parent):
         top = ttk.Frame(parent); top.pack(fill="x", padx=8, pady=(8, 4))
         now = datetime.now()
-        self.mgmt_date_from = tk.StringVar(value=now.replace(day=1).strftime("%Y-%m-%d"))
+        self.mgmt_date_from = tk.StringVar(value=(now - timedelta(days=90)).strftime("%Y-%m-%d"))
         self.mgmt_date_to = tk.StringVar(value=now.strftime("%Y-%m-%d"))
         ttk.Label(top, text="Từ ngày:").pack(side="left")
         ttk.Entry(top, textvariable=self.mgmt_date_from, width=12).pack(side="left", padx=(2, 8))
         ttk.Label(top, text="Đến ngày:").pack(side="left")
         ttk.Entry(top, textvariable=self.mgmt_date_to, width=12).pack(side="left", padx=(2, 8))
-        ttk.Label(top, text="(định dạng NĂM-THÁNG-NGÀY, vd 2026-08-01)", foreground="gray").pack(side="left")
+        ttk.Label(top, text="(định dạng NĂM-THÁNG-NGÀY, vd 2026-08-01 — mặc định 3 tháng gần nhất)",
+                  foreground="gray").pack(side="left")
         ttk.Button(top, text="↻ Làm mới danh sách", command=self._reload_report_lists).pack(side="left", padx=(8, 0))
 
         sub = ttk.Notebook(parent)
         sub.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        processing_tab = ttk.Frame(sub)
-        draft_tab = ttk.Frame(sub)
-        sub.add(processing_tab, text="Đang xử lý")
-        sub.add(draft_tab, text="Nháp")
-
-        self.mgmt_trees = {
-            "processing": self._build_report_tree(processing_tab, "processing"),
-            "draft": self._build_report_tree(draft_tab, "draft"),
-        }
-        self.mgmt_items = {"processing": {}, "draft": {}}   # iid -> item dict đầy đủ
-        self._reload_report_lists()
+        self.mgmt_trees = {}
+        self.mgmt_items = {}
+        for which, label in self.MGMT_TABS:
+            tab = ttk.Frame(sub)
+            sub.add(tab, text=label)
+            self.mgmt_trees[which] = self._build_report_tree(tab, which)
+            self.mgmt_items[which] = {}   # iid -> item dict đầy đủ
+        self._reload_report_lists()   # tự làm mới 1 lần ngay khi mở màn hình chính (mỗi lần đăng nhập)
 
     def _build_report_tree(self, parent, which):
         wrap = ttk.Frame(parent); wrap.pack(fill="both", expand=True)
@@ -3078,7 +3240,7 @@ class App(tk.Tk):
             messagebox.showerror("Sai định dạng ngày",
                                   "Từ ngày/Đến ngày phải theo định dạng NĂM-THÁNG-NGÀY, vd 2026-08-01.")
             return
-        for which in ("processing", "draft"):
+        for which, _label in self.MGMT_TABS:
             self._load_report_list(which, date_from, date_to)
 
     def _load_report_list(self, which, date_from, date_to):
@@ -3088,10 +3250,17 @@ class App(tk.Tk):
                 if which == "processing":
                     items = _search_my_report(s, grid="prepareProcessDocument",
                                                date_from=date_from, date_to=date_to, count=200)
+                elif which == "processed":
+                    items = _search_processed_report(s, date_from=date_from, date_to=date_to, count=200)
                 else:
+                    # "Nháp" = mọi thứ không phải "Đang xử lý" (1) / "Hoàn thành" (3) — đã xác
+                    # nhận qua 3 file HAR thật: status của "Nháp" không chỉ là 0 (chưa từng
+                    # trình), phiếu vừa THU HỒI mang status=4 (và có cả status=2 quan sát được)
+                    # — lọc đúng status==0 làm mất các phiếu này. Danh sách grid=None chưa bao
+                    # giờ thấy status 1/3 lẫn vào, nên chỉ cần loại đúng 2 giá trị đó.
                     items = [it for it in _search_my_report(s, grid=None, date_from=date_from,
                                                               date_to=date_to, count=200)
-                             if it.get("status") == 0]
+                             if it.get("status") not in (1, 3)]
             except Exception as e:
                 self.after(0, lambda: self.log(f"• Không tải được danh sách phiếu trình ({which}): {e!r}"))
                 return
@@ -3106,8 +3275,9 @@ class App(tk.Tk):
             date = (it.get("createdDate") or "").replace("T", " ")
             content = (it.get("content") or "").strip()
             holder = it.get("receiveUser") or ""
+            finish = (it.get("finishDate") or "").replace("T", " ")
             iid = str(it.get("reportId"))
-            tree.insert("", "end", iid=iid, values=(date, content, holder))
+            tree.insert("", "end", iid=iid, values=(date, content, holder, finish))
             self.mgmt_items[which][iid] = it
 
     def _open_report_detail(self, which):
@@ -3119,6 +3289,173 @@ class App(tk.Tk):
         if not item:
             return
         ReportDetailWindow(self, item, which, self.session)
+
+    def _edit_in_compose(self, item):
+        """Nhảy sang tab "Soạn văn bản", tự điền toàn bộ thông tin + file của 1 phiếu Nháp đã
+        có (gọi từ nút "Sửa" trong ReportDetailWindow) — cho sửa/đổi file rồi bấm CHẠY như
+        bình thường để Lưu/Trình lại (xem run_pipeline/save_document/save_report_draft: đã
+        nhận report_id/_existing_pid để cập nhật đúng phiếu/văn bản cũ, không tạo mới)."""
+        has_data = bool(self.file_report.get().strip() or self.doc_sections[0].file_draft.get().strip())
+        if has_data and not messagebox.askyesno(
+                "Sửa phiếu trình",
+                "Form \"Soạn văn bản\" đang có dữ liệu chưa lưu — chuyển sang sửa phiếu này sẽ "
+                "xoá hết dữ liệu đang nhập. Tiếp tục?"):
+            return
+        self._reset_form()
+        self._notebook.select(self._compose_tab)
+        report_id = item.get("reportId")
+        self._editing_report_id = report_id
+        self.log(f"— Đang tải dữ liệu phiếu #{report_id} để sửa… —")
+
+        s = self.session
+        tmpdir = tempfile.mkdtemp(prefix="voffice_edit_")
+        self._edit_tmpdirs.append(tmpdir)   # dọn ở _cleanup_edit_tmpdirs (Làm mới form / thoát)
+
+        def worker():
+            result = {"report_local": None, "extra_locals": [], "docs": [], "report_existing_attach_ids": []}
+            # 1. File của chính Phiếu trình (+ tài liệu thêm) — link kèm token đã có sẵn
+            #    trong attachPathIcons của item (không cần API mới).
+            hrefs = re.findall(r"href='([^']+)'[^>]*>\s*<img[^>]*title='([^']*)'",
+                                item.get("attachPathIcons") or "")
+            for i, (href, title) in enumerate(hrefs):
+                url = BASE + "/" + html_unescape(href)
+                m = re.search(r"attachId=(\d+)", href)
+                if m:
+                    # Nhớ lại ID file cũ của chính phiếu trình — xoá (removeFile.do) trước khi
+                    # lưu lại, cùng lý do/cơ chế như file của từng văn bản (xem
+                    # remove_attach_file/run_pipeline) — nếu không sẽ tích file trùng lặp y hệt.
+                    result["report_existing_attach_ids"].append(m.group(1))
+                dest = os.path.join(tmpdir, f"report_{i}_{title}")
+                try:
+                    download_attach(s, url, dest, self.log)
+                    if i == 0:
+                        result["report_local"] = dest
+                    else:
+                        result["extra_locals"].append(dest)
+                except Exception as e:
+                    self.log(f"   • Không tải được file phiếu trình '{title}': {e!r}")
+
+            # 2. Chi tiết từng văn bản (Loại VB/Số/Trích yếu/Nơi nhận/Khẩn-mật/Người ký).
+            attachs = fetch_report_attachs(s, report_id, self.log)
+            for doc_item in fetch_document_of_report(s, report_id, self.log):
+                pid = doc_item.get("publishDocumentId")
+                own_files = [a for a in attachs if a.get("documentId") == pid]
+                doc = {
+                    "doc_type": doc_item.get("documentType") or "",
+                    "code": doc_item.get("code") or "",
+                    "abstract": doc_item.get("documentAbstract") or "",
+                    "priority": doc_item.get("priority") or "",
+                    "security": doc_item.get("securityType") or "",
+                    "receive_inside": doc_item.get("receiveInside") or "",
+                    "receive_report": doc_item.get("receiveReport") or "",
+                    "receive_edoc": doc_item.get("receiveEdoc") or "",
+                    "receive_know": doc_item.get("receiveToKnow") or "",
+                    "receive_save": doc_item.get("receiveSaveDepartment") or "",
+                    "existing_pid": pid,
+                    "local_file": None,
+                    "extra_locals": [],
+                    # ID file CŨ của văn bản này — cần xoá (removeFile.do) khi thật sự Lưu/Trình
+                    # lại, nếu không file mới upload lại sẽ CỘNG THÊM vào chứ không thay thế (xem
+                    # remove_attach_file / run_pipeline).
+                    "existing_attach_ids": [f["draftDocumentId"] for f in own_files if f.get("draftDocumentId")],
+                }
+                main_file = next((a for a in own_files if a.get("documentAbstract")), None) or \
+                    (own_files[0] if own_files else None)
+                if own_files:
+                    # Tải TOÀN BỘ file của văn bản này (không chỉ file chính) — trước đây chỉ
+                    # tải main_file nên các "Tài liệu gửi kèm" (vd 1 văn bản có nhiều file phụ,
+                    # xác nhận qua HAR có tới 6-7 file/văn bản) bị bỏ sót, không đưa vào lại
+                    # form Sửa.
+                    tokens = fetch_draft_attach_tokens(s, pid, self.log)
+                    for f in own_files:
+                        info = tokens.get(f.get("draftDocumentId"))
+                        name = f.get("draftDocumentName") or "file.pdf"
+                        if not info:
+                            self.log(f"   • Không tìm thấy token tải file '{name}' (publishDocumentId={pid}) "
+                                     "— tự chọn lại file này trước khi bấm CHẠY.")
+                            continue
+                        dest = os.path.join(tmpdir, f"doc_{pid}_{name}")
+                        url = f"{BASE}/uploadiframe!openFile.do?token={info['token']}&attachId={f['draftDocumentId']}"
+                        try:
+                            download_attach(s, url, dest, self.log)
+                            if f is main_file:
+                                doc["local_file"] = dest
+                            else:
+                                doc["extra_locals"].append(dest)
+                        except Exception as e:
+                            self.log(f"   • Không tải được file '{name}' (publishDocumentId={pid}): {e!r} "
+                                     "— tự chọn lại file này trước khi bấm CHẠY.")
+                result["docs"].append(doc)
+            self.after(0, lambda: self._apply_edit_data(item, result))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_edit_data(self, item, result):
+        if result["report_local"]:
+            self.file_report.set(result["report_local"])
+        for p in result["extra_locals"]:
+            if p not in self.extra_report.paths:
+                self.extra_report.paths.append(p)
+                self.extra_report.lb.insert("end", os.path.basename(p))
+        self._editing_report_existing_attach_ids = result.get("report_existing_attach_ids") or []
+
+        self.report_content.delete("1.0", "end")
+        self.report_content.insert("1.0", item.get("content") or "")
+
+        docs = result["docs"] or [{}]
+        for i, doc in enumerate(docs):
+            if i >= len(self.doc_sections):
+                self._add_document_section()
+            ds = self.doc_sections[i]
+            if doc.get("doc_type"):
+                ds.doc_type.set(doc["doc_type"])
+            ds.code.delete(0, "end"); ds.code.insert(0, doc.get("code") or "")
+            ds.abstract.delete("1.0", "end"); ds.abstract.insert("1.0", doc.get("abstract") or "")
+            if doc.get("local_file"):
+                ds.file_draft.set(doc["local_file"])
+            for p in doc.get("extra_locals") or []:
+                if p not in ds.extra.paths:
+                    ds.extra.paths.append(p)
+                    ds.extra.lb.insert("end", os.path.basename(p))
+            ds._existing_pid = doc.get("existing_pid")
+            ds._existing_attach_ids = doc.get("existing_attach_ids") or []
+
+        first = docs[0]
+        if first.get("priority"):
+            self.priority.set(first["priority"])
+        if first.get("security"):
+            self.security.set(first["security"])
+        for name, fid in self._profile_by_name.items():
+            if fid == item.get("fileId"):
+                self.work_profile.set(name); break
+
+        self._fill_recipients_best_effort(first)
+
+        self.log(f"— Đã điền xong dữ liệu phiếu #{item.get('reportId')} — kiểm tra lại rồi bấm CHẠY. "
+                  "Luồng trình/Người ký KHÔNG tự chọn lại — tự chọn lại nếu cần. —")
+        self._refresh_readiness()
+
+    def _fill_recipients_best_effort(self, doc):
+        """Điền lại Nơi nhận từ TÊN (không có ID) bằng khớp gần nhất trong cây đơn vị — best
+        effort, giống triết lý "tự điền chỉ để đỡ gõ tay" đã ghi trong HUONG_DAN.md. Luôn tự
+        kiểm tra lại trước khi bấm CHẠY."""
+        cat_field_tree = [
+            ("inside", "receive_inside", CAY["internal"]["nodes"]),
+            ("report", "receive_report", CAY["internal"]["nodes"]),
+            ("know", "receive_know", CAY["internal"]["nodes"]),
+            ("save", "receive_save", CAY["internal"]["nodes"]),
+            ("edoc", "receive_edoc", CAY["lien_thong"]["nodes"]),
+        ]
+        for cat, field, nodes in cat_field_tree:
+            names = [n.strip() for n in (doc.get(field) or "").split(";") if n.strip()]
+            for name in names:
+                matches = search_nodes(name, nodes, self.store, k=1)
+                if matches:
+                    nd = matches[0]
+                    if not any(_node_key(x) == _node_key(nd) for x in self.recip.buckets[cat]):
+                        self.recip.buckets[cat].append(nd)
+                else:
+                    self.log(f"   • Không khớp được nơi nhận '{name}' trong cây đơn vị — tự thêm tay.")
+        self.recip._render_chips()
 
     def _ask_captcha(self, path):
         try:
@@ -3207,6 +3544,8 @@ class ReportDetailWindow(tk.Toplevel):
         if which == "processing":
             self.btn_cancel = ttk.Button(top, text="Thu hồi", command=self._confirm_cancel)
             self.btn_cancel.pack(side="left")
+        if which == "draft":
+            ttk.Button(top, text="Sửa", command=self._edit_in_compose).pack(side="left")
         ttk.Button(top, text="Đóng", command=self.destroy).pack(side="left", padx=6)
 
         self.status_var = tk.StringVar(value="")
@@ -3298,6 +3637,10 @@ class ReportDetailWindow(tk.Toplevel):
         if ok:
             self.master._reload_report_lists()
             self.destroy()
+
+    def _edit_in_compose(self):
+        self.master._edit_in_compose(self.item)
+        self.destroy()
 
 
 class PreviewWindow(tk.Toplevel):
