@@ -1591,17 +1591,40 @@ def extract_draft_fields(path):
         return doc_type, code, abstract
     return None, code, extract_abstract_from_text(text)
 
+# ---------- Thư mục tạm cho file PHÁI SINH (chuyển .docx, đánh số chữ ký) ----------
+# Không bao giờ ghi đè lên đúng đường dẫn file gốc (dễ lỗi nếu file gốc đang mở ở chương trình
+# khác) và không đổi tên (thêm ngày/hậu tố) để tránh rác/lẫn lộn trong thư mục của người dùng —
+# thay vào đó luôn tạo 1 thư mục tạm RIÊNG (do chương trình toàn quyền sở hữu, không ai khác
+# đụng tới) cho mỗi file phái sinh, giữ NGUYÊN TÊN gốc bên trong đó. Dọn lúc thoát chương trình
+# (atexit) — các file này chỉ dùng 1 lần cho đúng lượt upload hiện tại, không cần giữ lại.
+_GEN_TMPDIRS = []
+
+def _cleanup_gen_tmpdirs():
+    for d in _GEN_TMPDIRS:
+        shutil.rmtree(d, ignore_errors=True)
+    _GEN_TMPDIRS.clear()
+
+atexit.register(_cleanup_gen_tmpdirs)
+
+def _new_gen_tmpdir(prefix):
+    d = tempfile.mkdtemp(prefix=prefix)
+    _GEN_TMPDIRS.append(d)
+    return d
+
 def convert_office_doc_to_pdf(path):
     """Chuyển .docx sang .pdf bằng gói docx2pdf (điều khiển Word cài sẵn trên máy). KHÔNG hỗ
-    trợ .doc (định dạng cũ) — gói docx2pdf tự chặn cứng chỉ nhận .docx. Lưu PDF cạnh file gốc,
-    cùng tên. Trả về đường dẫn PDF vừa tạo."""
+    trợ .doc (định dạng cũ) — gói docx2pdf tự chặn cứng chỉ nhận .docx. Lưu PDF vào 1 thư mục
+    tạm riêng (xem _new_gen_tmpdir ở trên) — KHÔNG lưu cạnh file gốc nữa (tránh ghi đè nếu 1
+    bản PDF cùng tên đã tồn tại và đang mở ở chương trình khác). Tên file giữ nguyên, chỉ đổi
+    đuôi .docx -> .pdf. Trả về đường dẫn PDF vừa tạo."""
     if docx2pdf is None:
         raise RuntimeError("Chưa cài thư viện 'docx2pdf'. Chạy: pip install docx2pdf")
     if not path.lower().endswith(".docx"):
         raise RuntimeError("Chỉ hỗ trợ .docx — file .doc (định dạng cũ) hãy tự mở bằng Word, "
                             "'Save As' sang .docx hoặc .pdf rồi chọn lại.")
     src = os.path.abspath(path)
-    pdf_path = os.path.splitext(src)[0] + ".pdf"
+    out_dir = _new_gen_tmpdir("voffice_conv_")
+    pdf_path = os.path.join(out_dir, os.path.splitext(os.path.basename(src))[0] + ".pdf")
     docx2pdf.convert(src, pdf_path)
     if not os.path.exists(pdf_path):
         raise RuntimeError("Word không tạo ra file PDF (không rõ lý do) — tự xuất PDF tay rồi chọn lại.")
@@ -1939,15 +1962,15 @@ def find_signature_stamps(doc, flow_items, log):
     return stamps
 
 def _sig_tagged_path(path):
-    folder = os.path.dirname(path)
-    stem, ext = os.path.splitext(os.path.basename(path))
-    today = datetime.now().strftime("%d.%m.%y")
-    return os.path.join(folder, f"{stem} - {today}{ext}")
+    """Đường dẫn cho bản PDF đã đánh số — 1 thư mục tạm riêng (xem _new_gen_tmpdir), giữ
+    NGUYÊN TÊN gốc bên trong (không ghi đè file gốc, không thêm ngày/hậu tố)."""
+    out_dir = _new_gen_tmpdir("voffice_stamp_")
+    return os.path.join(out_dir, os.path.basename(path))
 
 def stamp_signature_numbers(path, flow_items, log, stamps=None):
     """Đọc 1 file PDF (phiếu trình hoặc dự thảo văn bản), tìm vị trí ký theo luồng, ghi
-    chú thích (Text annot) số thứ tự. Lưu bản đã đánh số NGAY CẠNH file gốc, tên gắn thêm
-    " - <ngày hôm nay dd.mm.yy>" (file gốc giữ nguyên, không sửa). Trả về đường dẫn để upload —
+    chú thích (Text annot) số thứ tự. Lưu bản đã đánh số vào 1 thư mục tạm riêng, GIỮ NGUYÊN
+    TÊN gốc (file gốc giữ nguyên, không sửa/không ghi đè). Trả về đường dẫn để upload —
     là bản đã đánh số nếu có đánh được gì, hoặc chính path gốc nếu không tìm thấy vị trí ký.
     Nếu `stamps` được truyền vào (VD: đã được người dùng chỉnh trong khung xem trước),
     dùng nguyên danh sách đó thay vì tự quét lại file. `flow_items`: node list của luồng
@@ -3325,7 +3348,11 @@ class App(tk.Tk):
                     # lưu lại, cùng lý do/cơ chế như file của từng văn bản (xem
                     # remove_attach_file/run_pipeline) — nếu không sẽ tích file trùng lặp y hệt.
                     result["report_existing_attach_ids"].append(m.group(1))
-                dest = os.path.join(tmpdir, f"report_{i}_{title}")
+                # Thư mục con RIÊNG cho từng file (không đổi tên/thêm tiền tố) — tránh trùng tên
+                # nếu 2 file tình cờ cùng tên, vẫn giữ nguyên tên gốc thấy được trên form.
+                sub = os.path.join(tmpdir, f"phieu_trinh_{i}")
+                os.makedirs(sub, exist_ok=True)
+                dest = os.path.join(sub, title)
                 try:
                     download_attach(s, url, dest, self.log)
                     if i == 0:
@@ -3367,14 +3394,18 @@ class App(tk.Tk):
                     # xác nhận qua HAR có tới 6-7 file/văn bản) bị bỏ sót, không đưa vào lại
                     # form Sửa.
                     tokens = fetch_draft_attach_tokens(s, pid, self.log)
-                    for f in own_files:
+                    for fi, f in enumerate(own_files):
                         info = tokens.get(f.get("draftDocumentId"))
                         name = f.get("draftDocumentName") or "file.pdf"
                         if not info:
                             self.log(f"   • Không tìm thấy token tải file '{name}' (publishDocumentId={pid}) "
                                      "— tự chọn lại file này trước khi bấm CHẠY.")
                             continue
-                        dest = os.path.join(tmpdir, f"doc_{pid}_{name}")
+                        # Thư mục con riêng cho từng file — giữ nguyên tên gốc (xem lý do ở
+                        # nhánh tải file phiếu trình phía trên).
+                        sub = os.path.join(tmpdir, f"van_ban_{pid}_{fi}")
+                        os.makedirs(sub, exist_ok=True)
+                        dest = os.path.join(sub, name)
                         url = f"{BASE}/uploadiframe!openFile.do?token={info['token']}&attachId={f['draftDocumentId']}"
                         try:
                             download_attach(s, url, dest, self.log)

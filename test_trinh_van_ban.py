@@ -268,12 +268,14 @@ class TestParseSelectOptions(unittest.TestCase):
         self.assertNotIn("-1", [f["id"] for f in flows])   # dòng "---Chọn---" phải bị loại
 
 
-# ==================== _sig_tagged_path (tên file đánh số theo ngày) ====================
+# ==================== _sig_tagged_path (đường dẫn file đã đánh số — thư mục tạm, giữ nguyên tên) ====================
 class TestSigTaggedPath(unittest.TestCase):
-    def test_dinh_dang_ngay(self):
-        import re
+    def test_giu_nguyen_ten_trong_thu_muc_tam_rieng(self):
         out = tvb._sig_tagged_path("/tmp/CV gửi Vụ PC.pdf")
-        self.assertRegex(os.path.basename(out), r"^CV gửi Vụ PC - \d{2}\.\d{2}\.\d{2}\.pdf$")
+        self.assertEqual(os.path.basename(out), "CV gửi Vụ PC.pdf")   # giữ nguyên tên gốc
+        self.assertNotEqual(os.path.dirname(out), "/tmp")   # không còn nằm cạnh file gốc
+        self.assertIn("voffice_stamp_", os.path.dirname(out))   # thư mục tạm riêng do chương trình tạo
+        self.assertTrue(os.path.isdir(os.path.dirname(out)))
 
 
 # ==================== _match_report (khớp phiếu trình vừa lưu — xác minh "đã trình") ====================
