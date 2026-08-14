@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Sổ riêng của từng máy (đăng nhập, ID nơi nhận đã tra, luồng trình đã học...) - mỗi máy tự
+# tạo/tự học lại, không đồng bộ qua git (xem HUONG_DAN.md).
+settings.json
+id_cache.json
+luong_trinh.json
+nguoi_dung.json
