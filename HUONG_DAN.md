@@ -2,7 +2,7 @@
 
 ## Chuẩn bị (làm 1 lần)
 1. Cài Python 3.9+ (tick "Add to PATH" khi cài trên Windows).
-2. Mở Terminal/CMD, chạy: `pip install requests pypdf pymupdf`
+2. Mở Terminal/CMD, chạy: `pip install requests pypdf pymupdf keyring`
 3. Để **các file dữ liệu cùng một thư mục** với `trinh_van_ban.py` (`du_lieu.json`, `noi_nhan.json`, `cay_don_vi.json`, `luong_trinh.json`).
 
 ## Chạy

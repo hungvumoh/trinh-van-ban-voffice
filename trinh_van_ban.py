@@ -11,7 +11,7 @@ Cần: Python 3.9+, thư viện requests  ->  pip install requests
 Đặt 3 file cùng thư mục: trinh_van_ban.py, du_lieu.json, noi_nhan.json
 Chạy:  python trinh_van_ban.py
 """
-import atexit, base64, json, os, re, shutil, subprocess, sys, tempfile, time, threading, unicodedata
+import atexit, base64, json, os, re, shutil, subprocess, sys, tempfile, textwrap, time, threading, unicodedata
 from html import unescape as html_unescape   # tên "html" đã dùng làm biến cục bộ khắp file (nội dung
                                               # trang) — import tách riêng để khỏi đụng nhau
 from contextlib import contextmanager
@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from urllib.parse import quote, unquote, urljoin
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from tkinter import font as tkfont
 
 try:
     import requests
@@ -975,12 +976,19 @@ def _search_processed_report(s, date_from=None, date_to=None, count=50):
     r = s.post(BASE + "/voReport!onSearchReport.do", params={"grid": "processed"}, data=data, timeout=30)
     return r.json().get("items") or []
 
-def _match_report(items, content, creator_id, since_dt):
-    """Khớp đúng phiếu trình VỪA lưu trong `items` (kết quả _search_my_report): content nguyên
-    văn + tạo sau `since_dt` (trừ hao 10 giây cho lệch giờ máy/server) — đã kiểm chứng bằng HAR
-    thật (createdDate khớp chính xác tới từng giây với lúc gọi onUpdate). Chỉ so thêm creatorId
-    khi có (`creator_id` có thể None nếu không lấy được danh tính tài khoản — vẫn cứ khớp theo
-    content + thời gian, không bỏ cuộc hoàn toàn chỉ vì thiếu 1 lớp so khớp phụ)."""
+def _match_report(items, content, creator_id, since_dt, expect_report_id=None):
+    """Khớp đúng phiếu trình VỪA lưu trong `items` (kết quả _search_my_report).
+    `expect_report_id`: có giá trị khi đang SỬA 1 phiếu trình đã có (biết chắc ID trước khi lưu)
+    — khớp thẳng theo `reportId`, KHÔNG dùng bộ lọc content/thời gian bên dưới, vì `createdDate`
+    server trả về là ngày TẠO GỐC (không đổi khi sửa) nên lúc nào cũng sớm hơn `since_dt` (thời
+    điểm sửa) — bộ lọc thời gian sẽ luôn loại bỏ nhầm chính phiếu vừa sửa nếu áp dụng ở đây.
+    Không có `expect_report_id` (đang TẠO MỚI, chưa có ID nào để dựa vào) mới rơi về cách cũ:
+    content nguyên văn + tạo sau `since_dt` (trừ hao 10 giây cho lệch giờ máy/server) — đã kiểm
+    chứng bằng HAR thật (createdDate khớp chính xác tới từng giây với lúc gọi onUpdate). Chỉ so
+    thêm creatorId khi có (`creator_id` có thể None nếu không lấy được danh tính tài khoản — vẫn
+    cứ khớp theo content + thời gian, không bỏ cuộc hoàn toàn chỉ vì thiếu 1 lớp so khớp phụ)."""
+    if expect_report_id is not None:
+        return next((it for it in items if str(it.get("reportId")) == str(expect_report_id)), None)
     target = (content or "").strip()
     matches = []
     for it in items:
@@ -1176,6 +1184,10 @@ def verify_report_saved(s, cfg, sign, since_dt, log=lambda *a: None):
         log("   • Không xác định được tài khoản đang đăng nhập — vẫn thử khớp theo nội dung + thời gian.")
     creator_id = identity[0] if identity else None
     content = cfg.get("report_content", "")
+    # Đang SỬA phiếu cũ (cfg["report_id"] đã biết trước khi lưu) — khớp thẳng theo reportId thay
+    # vì content+since_dt (xem _match_report): createdDate không đổi khi sửa nên luôn "cũ hơn"
+    # since_dt, bộ lọc thời gian sẽ loại bỏ nhầm chính phiếu vừa sửa nếu vẫn dùng cách cũ.
+    expect_report_id = cfg.get("report_id")
 
     item, in_process = None, False
     for attempt, delay in enumerate(VERIFY_RETRY_DELAYS, start=1):
@@ -1183,12 +1195,13 @@ def verify_report_saved(s, cfg, sign, since_dt, log=lambda *a: None):
         time.sleep(delay)
         try:
             item_process = _match_report(_search_my_report(s, grid="prepareProcessDocument"),
-                                          content, creator_id, since_dt)
+                                          content, creator_id, since_dt, expect_report_id)
         except Exception as e:
             log(f"   • Tra hộp 'đang trình' lỗi: {e!r}")
             item_process = None
         try:
-            item_all = _match_report(_search_my_report(s, grid=None), content, creator_id, since_dt)
+            item_all = _match_report(_search_my_report(s, grid=None), content, creator_id, since_dt,
+                                      expect_report_id)
         except Exception as e:
             log(f"   • Tra danh sách phiếu trình (kể cả nháp) lỗi: {e!r}")
             item_all = None
@@ -1967,6 +1980,23 @@ def _sig_tagged_path(path):
     out_dir = _new_gen_tmpdir("voffice_stamp_")
     return os.path.join(out_dir, os.path.basename(path))
 
+def _clear_old_signature_stamps(doc, log):
+    """Xoá các annotation số chữ ký do CHÍNH hàm này từng ghi ở lần đánh số trước (nếu file này
+    đã đánh số rồi, VD Thu hồi → sửa → Trình lại đúng file cũ) — không xoá thì số mới bị chồng
+    lên số cũ, nhìn như trùng/lộn xộn. Nhận diện đúng annotation của mình (không đụng ghi chú
+    khác lỡ có sẵn trong file): dạng Text/icon "Comment" VÀ nội dung CHỈ là 1 số thuần — xem
+    stamp_signature_numbers() (page.add_text_annot(point, str(số), icon="Comment"))."""
+    removed = 0
+    for page in doc:
+        for annot in list(page.annots() or []):
+            info = annot.info or {}
+            if (annot.type[1] == "Text" and info.get("name") == "Comment"
+                    and (info.get("content") or "").strip().isdigit()):
+                page.delete_annot(annot)
+                removed += 1
+    if removed:
+        log(f"   • Đã xoá {removed} số chữ ký cũ (đánh số lại từ đầu theo luồng hiện tại).")
+
 def stamp_signature_numbers(path, flow_items, log, stamps=None):
     """Đọc 1 file PDF (phiếu trình hoặc dự thảo văn bản), tìm vị trí ký theo luồng, ghi
     chú thích (Text annot) số thứ tự. Lưu bản đã đánh số vào 1 thư mục tạm riêng, GIỮ NGUYÊN
@@ -1982,6 +2012,7 @@ def stamp_signature_numbers(path, flow_items, log, stamps=None):
 
     doc = fitz.open(path)
     try:
+        _clear_old_signature_stamps(doc, log)
         if stamps is None:
             stamps = find_signature_stamps(doc, flow_items, log)
         if not stamps:
@@ -2195,7 +2226,13 @@ class RecipientBox(ttk.LabelFrame):
 
 
 class FileList(ttk.Frame):
-    """Danh sách file: nút thêm + listbox + nút bỏ. get() -> [đường dẫn]."""
+    """Danh sách file: nút thêm + listbox + nút bỏ. get() -> [đường dẫn].
+    Listbox tự giãn chiều cao theo đúng số file đang có (tối thiểu MIN_HEIGHT, tối đa
+    MAX_HEIGHT dòng) — bộ trình có nhiều file thì thấy hết luôn, không bị cắt còn 2 dòng như
+    trước; quá MAX_HEIGHT thì để phần cuộn của cả tab (_make_scrollable) lo tiếp."""
+    MIN_HEIGHT = 2
+    MAX_HEIGHT = 12
+
     def __init__(self, parent, label):
         super().__init__(parent)
         self.pack(fill="x", pady=2)
@@ -2204,19 +2241,31 @@ class FileList(ttk.Frame):
         ttk.Label(top, text=label, width=22).pack(side="left")
         ttk.Button(top, text="Thêm file…", command=self._add).pack(side="left")
         ttk.Button(top, text="Bỏ chọn", command=self._remove).pack(side="left", padx=4)
-        self.lb = tk.Listbox(self, height=2)
+        self.lb = tk.Listbox(self, height=self.MIN_HEIGHT)
         self.lb.pack(fill="x", padx=(0, 0))
+
+    def _resize(self):
+        self.lb.config(height=max(self.MIN_HEIGHT, min(len(self.paths), self.MAX_HEIGHT)))
 
     def _add(self):
         ps = filedialog.askopenfilenames(filetypes=[("PDF", "*.pdf"), ("Tất cả", "*.*")])
         for p in ps:
             if p not in self.paths:
                 self.paths.append(p); self.lb.insert("end", os.path.basename(p))
+        self._resize()
 
     def _remove(self):
         sel = list(self.lb.curselection())
         for i in reversed(sel):
             self.lb.delete(i); del self.paths[i]
+        self._resize()
+
+    def add_path(self, p):
+        """Thêm 1 đường dẫn từ NGOÀI (vd _apply_edit_data khi Sửa) — khác _add() ở chỗ không tự
+        mở hộp thoại chọn file, chỉ nạp sẵn + tự giãn chiều cao như _add()."""
+        if p not in self.paths:
+            self.paths.append(p); self.lb.insert("end", os.path.basename(p))
+            self._resize()
 
     def get(self):
         return list(self.paths)
@@ -2224,6 +2273,7 @@ class FileList(ttk.Frame):
     def clear(self):
         self.paths = []
         self.lb.delete(0, "end")
+        self._resize()
 
 
 class DocumentSection(ttk.LabelFrame):
@@ -2265,6 +2315,17 @@ class DocumentSection(ttk.LabelFrame):
         self.abstract = tk.Text(f, height=2, wrap="word")
         self.abstract.pack(side="left", fill="x", expand=True)
 
+        # Cảnh báo đọc file tự động thất bại — hiện ngay tại văn bản liên quan thay vì chỉ ghi
+        # vào log kỹ thuật (đã ẩn khỏi giao diện chính, xem App.log).
+        self.warn_label = ttk.Label(self, text="", foreground="#c62828", wraplength=420, justify="left")
+        self.warn_label.pack(anchor="w", pady=(2, 0))
+
+    def _set_warning(self, msg):
+        self.warn_label.config(text="⚠ " + msg)
+
+    def _clear_warning(self):
+        self.warn_label.config(text="")
+
     def _pick(self):
         p = filedialog.askopenfilename(
             filetypes=[("PDF/Word", "*.pdf *.docx"), ("Tất cả", "*.*")])
@@ -2298,9 +2359,9 @@ class DocumentSection(ttk.LabelFrame):
         except Exception as e:
             err = str(e)
         if err:
-            self.app.after(0, lambda: self.app.log(
-                f"• Không đọc nhanh được .docx để tự điền: {err} — vẫn có thể tự điền lại "
-                "sau khi bấm CHẠY (lúc đó có bản PDF)."))
+            msg = (f"Không đọc nhanh được .docx để tự điền: {err} — vẫn có thể tự điền lại "
+                   "sau khi bấm CHẠY (lúc đó có bản PDF).")
+            self.app.after(0, lambda: self._set_warning(msg))
             return
         self.app.after(0, self._apply_extract, seq, doc_type, code, abstract, None)
 
@@ -2317,8 +2378,9 @@ class DocumentSection(ttk.LabelFrame):
         if seq != self._extract_seq:
             return   # đã chọn file khác cho văn bản này trong lúc đọc — bỏ kết quả cũ
         if err:
-            self.app.log(f"• Không đọc được PDF để tự điền: {err}")
+            self._set_warning(f"Không đọc được PDF để tự điền: {err}")
             return
+        self._clear_warning()
         if doc_type:
             self.doc_type.set(doc_type)
         if code:
@@ -2332,14 +2394,6 @@ class DocumentSection(ttk.LabelFrame):
             self.abstract.delete("1.0", "end"); self.abstract.insert("1.0", abstract)
             if not self.app.report_content.get("1.0", "end-1c").strip():   # không ghi đè nếu đã có/văn bản khác đã điền
                 self.app.report_content.delete("1.0", "end"); self.app.report_content.insert("1.0", abstract)
-        bits = []
-        if doc_type: bits.append(f"Loại VB={doc_type!r}")
-        if code: bits.append(f"Số/ký hiệu={code!r}")
-        if abstract: bits.append(f"Trích yếu={abstract!r}")
-        if bits:
-            self.app.log("• Đã tự điền từ PDF: " + "  ".join(bits))
-        else:
-            self.app.log("• Không tìm thấy Số/ký hiệu hoặc Trích yếu trong PDF — điền tay.")
 
     def get(self):
         return {
@@ -2408,7 +2462,11 @@ def make_scrollable_frame(parent):
     """Bọc nội dung trong Canvas + thanh cuộn dọc + cuộn chuột. Trả về frame bên trong để
     pack nội dung vào."""
     outer = ttk.Frame(parent); outer.pack(fill="both", expand=True)
-    canvas = tk.Canvas(outer, highlightthickness=0)
+    # tk.Canvas không tự đổi màu theo theme sáng/tối như các ô ttk khác (mặc định trắng) — dò
+    # đúng màu nền ttk hiện tại để không nổi thành 1 mảng trắng lạc quẻ khi hệ thống đang Dark
+    # Mode (đã xảy ra thật, xem phản hồi người dùng).
+    bg = ttk.Style().lookup("TFrame", "background") or parent.winfo_toplevel().cget("bg")
+    canvas = tk.Canvas(outer, highlightthickness=0, bg=bg)
     vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
     canvas.configure(yscrollcommand=vsb.set)
     canvas.pack(side="left", fill="both", expand=True)
@@ -2547,18 +2605,25 @@ class _ConvertingDialog(tk.Toplevel):
     khi mở khung Xem trước hoặc chạy Chỉ kiểm tra) — để người dùng biết đang có việc chạy ngầm
     (Word có thể mất vài giây tới vài chục giây), không phải chương trình bị treo."""
 
+    # Kích thước CỐ ĐỊNH (không tự co theo độ dài chữ) — đã đo qua các dòng trạng thái thực tế
+    # dùng cửa sổ này (tên file/số văn bản dài, đường dẫn...); chữ dài hơn tự xuống dòng
+    # (wraplength) thay vì đẩy cửa sổ giãn ra hoặc bị cắt.
+    WIDTH = 460
+    HEIGHT = 120
+
     def __init__(self, master, text):
         super().__init__(master)
         self.title("Đang chuẩn bị…")
         self.resizable(False, False)
         self.transient(master)
         self.protocol("WM_DELETE_WINDOW", lambda: None)   # không cho tự đóng giữa chừng
-        self.label = ttk.Label(self, text=text, padding=24)
-        self.label.pack()
+        self.label = ttk.Label(self, text=text, padding=24, wraplength=self.WIDTH - 48,
+                                justify="left", anchor="center")
+        self.label.pack(fill="both", expand=True)
         self.update_idletasks()
-        x = master.winfo_rootx() + master.winfo_width() // 2 - self.winfo_width() // 2
-        y = master.winfo_rooty() + master.winfo_height() // 2 - self.winfo_height() // 2
-        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        x = master.winfo_rootx() + master.winfo_width() // 2 - self.WIDTH // 2
+        y = master.winfo_rooty() + master.winfo_height() // 2 - self.HEIGHT // 2
+        self.geometry(f"{self.WIDTH}x{self.HEIGHT}+{max(x, 0)}+{max(y, 0)}")
         self.grab_set()
 
     def set_status(self, text):
@@ -2570,6 +2635,70 @@ class _ConvertingDialog(tk.Toplevel):
         except Exception:
             pass
         self.destroy()
+
+
+class SendLogWindow(tk.Toplevel):
+    """Cửa sổ trạng thái riêng cho Lưu dự thảo/Trình văn bản (xem PreviewWindow._send) — ĐỘC LẬP
+    với PreviewWindow, để người dùng luôn thấy tiến trình từng bước ngay cả khi PreviewWindow bị
+    che khuất. Cùng kiểu nhẹ nhàng (nền sáng, chỉ 1 khung chữ) như _ConvertingDialog ("Sửa phiếu
+    trình", "Tải danh sách phiếu trình") — KHÔNG phải khung log kỹ thuật nền đen; nội dung chỉ
+    gồm đúng các bước lớn (PIPELINE_PHASES) người dùng đã quen thấy ở checklist, không phải log
+    HTTP chi tiết (xem PreviewWindow._set_phase — nơi duy nhất gọi append() cho cửa sổ này).
+    Không có nút X (không tự đóng giữa chừng) — chỉ đóng được qua nút "Đóng" (tự đếm ngược khi đã
+    có kết quả, xem start_close_countdown), và đóng cửa sổ này sẽ đóng LUÔN PreviewWindow đi kèm
+    (xem `on_close` truyền vào lúc tạo — PreviewWindow._finish_post_send)."""
+
+    WIDTH = 460
+    HEIGHT = 260
+
+    def __init__(self, master, title, on_close):
+        super().__init__(master)
+        self.title(title)
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+        self._on_close_cb = on_close
+        self._countdown_id = None
+        self._lines = []
+
+        self.label = ttk.Label(self, text="", padding=20, justify="left", anchor="nw",
+                                wraplength=self.WIDTH - 40)
+        self.label.pack(fill="both", expand=True)
+
+        bottom = ttk.Frame(self, padding=(12, 8))
+        bottom.pack(fill="x")
+        # Vô hiệu tới khi có kết quả (xem start_close_countdown) — trong lúc đang chạy chưa có
+        # gì để "đóng xong xuôi", đóng giữa chừng dễ hiểu nhầm là huỷ được việc đang gửi.
+        self.btn_close = ttk.Button(bottom, text="Đóng", command=self._close_now, state="disabled")
+        self.btn_close.pack(side="right")
+
+        self.update_idletasks()
+        x = master.winfo_rootx() + master.winfo_width() // 2 - self.WIDTH // 2
+        y = master.winfo_rooty() + master.winfo_height() // 2 - self.HEIGHT // 2
+        self.geometry(f"{self.WIDTH}x{self.HEIGHT}+{max(x, 0)}+{max(y, 0)}")
+
+    def append(self, msg):
+        self._lines.append(msg)
+        self.label.config(text="\n".join(self._lines))
+
+    def start_close_countdown(self, seconds=5):
+        self.btn_close.config(state="normal")
+        self._tick(seconds)
+
+    def _tick(self, n):
+        if n <= 0:
+            self._close_now()
+            return
+        self.btn_close.config(text=f"Đóng ({n})")
+        self._countdown_id = self.after(1000, lambda: self._tick(n - 1))
+
+    def _close_now(self):
+        # Bấm tay lúc nào cũng đóng ngay (không "huỷ đếm ngược" — đây là nút Đóng thật, không
+        # phải nút Huỷ) — chỉ huỷ đúng cái hẹn giờ còn treo để khỏi gọi đóng 2 lần.
+        if self._countdown_id is not None:
+            self.after_cancel(self._countdown_id)
+            self._countdown_id = None
+        self.destroy()
+        self._on_close_cb()
 
 
 class App(tk.Tk):
@@ -2598,7 +2727,10 @@ class App(tk.Tk):
         return f
 
     # ---------- MÀN 1: ĐĂNG NHẬP ----------
-    def _show_login(self):
+    def _show_login(self, auto=True):
+        """`auto`: True (mặc định — lúc mở chương trình) — nếu đã "Nhớ đăng nhập" từ trước thì tự
+        bấm ĐĂNG NHẬP luôn, không cần người dùng làm gì. `_do_logout` gọi auto=False để KHÔNG tự
+        nhảy lại vào đúng tài khoản vừa đăng xuất — bắt buộc phải tự bấm lại."""
         self._clear()
         self.geometry("440x380")
         pad = ttk.Frame(self.container, padding=16); pad.pack(fill="both", expand=True)
@@ -2615,12 +2747,13 @@ class App(tk.Tk):
 
         # Điền sẵn từ lần trước
         saved_user = self.settings.get("username", "")
+        saved_pw = None
         if saved_user:
             self.username.insert(0, saved_user)
             if self.settings.get("remember"):
-                pw = load_password(saved_user)
-                if pw:
-                    self.password.insert(0, pw)
+                saved_pw = load_password(saved_user)
+                if saved_pw:
+                    self.password.insert(0, saved_pw)
         self.password.focus() if saved_user else self.username.focus()
 
         self.btn_login = ttk.Button(pad, text="ĐĂNG NHẬP", command=self._do_login)
@@ -2633,6 +2766,13 @@ class App(tk.Tk):
 
         ttk.Label(pad, text=AUTHOR_MARK, font=("", 8), foreground="#999999").pack(
             anchor="e", pady=(4, 0))
+
+        # Tự đăng nhập nếu có sẵn mật khẩu đã lưu — chạy qua after() để màn hình kịp vẽ ra
+        # trước (không "nhảy cóc" thẳng sang màn chính khiến người dùng không kịp hiểu chuyện gì
+        # xảy ra), _do_login vẫn dùng chung logic/xử lý lỗi như bấm tay bình thường.
+        if auto and saved_pw:
+            self._llog("• Đã lưu mật khẩu — tự đăng nhập…")
+            self.after(50, self._do_login)
 
     def _llog(self, msg):
         self.login_log.insert("end", msg + "\n"); self.login_log.see("end"); self.update_idletasks()
@@ -2671,9 +2811,172 @@ class App(tk.Tk):
         save_settings(self.settings)
         self._show_main()   # thành công → mở giao diện chính
 
+    def _do_logout(self):
+        """Đăng xuất — chỉ bỏ session đang dùng trên máy (KHÔNG gọi gì lên server, chưa xác nhận
+        được URL đăng xuất CAS thật qua HAR nên không đoán). Mật khẩu đã lưu (nếu có) vẫn giữ
+        nguyên trong Keychain — tự bỏ "Nhớ đăng nhập" ở màn đăng nhập lần sau nếu muốn quên hẳn."""
+        if not messagebox.askyesno("Đăng xuất", "Đăng xuất khỏi tài khoản hiện tại?"):
+            return
+        self.session = None
+        self._logged_user = None
+        self._show_login(auto=False)   # auto=False: không tự nhảy lại vào ngay tài khoản vừa thoát
+
     # ---------- Khung cuộn (dùng chung) ----------
     def _make_scrollable(self, parent):
         return make_scrollable_frame(parent)
+
+    def _compute_nav_colors(self):
+        """Tự dò xem giao diện hệ thống đang Sáng hay Tối (macOS Dark Mode…) để chọn màu sidebar
+        phù hợp — hardcode màu sáng khiến sidebar thành 1 mảng trắng lạc quẻ giữa ứng dụng đang
+        hiển thị tối (xem phản hồi người dùng kèm ảnh chụp màn hình)."""
+        style = ttk.Style(self)
+        base_bg = style.lookup("TFrame", "background") or self.cget("bg") or "#f0f0f0"
+        try:
+            r, g, b = self.winfo_rgb(base_bg)
+            luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 65535
+        except tk.TclError:
+            luminance = 1.0
+        if luminance < 0.5:   # nền tối
+            self._NAV_BG = base_bg
+            self._NAV_BG_ACTIVE = "#2d4a63"
+            self._NAV_FG = style.lookup("TLabel", "foreground") or "#e0e0e0"
+            self._NAV_FG_ACTIVE = "#7ec3ff"
+            self._NAV_ACCENT_ACTIVE = "#4da3ff"
+        else:                  # nền sáng
+            self._NAV_BG = "#f5f5f5"
+            self._NAV_BG_ACTIVE = "#e3f2fd"
+            self._NAV_FG = "#333333"
+            self._NAV_FG_ACTIVE = "#0d47a1"
+            self._NAV_ACCENT_ACTIVE = "#1976d2"
+
+        # Màu sọc xen kẽ cho bảng danh sách phiếu trình (xem _build_report_tree) — tính từ
+        # đúng màu nền Treeview thật của theme, không hardcode, để không lệch tông sáng/tối.
+        tree_bg = style.lookup("Treeview", "background") or base_bg
+        try:
+            tr, tg, tb = self.winfo_rgb(tree_bg)
+            tree_luminance = (0.299 * tr + 0.587 * tg + 0.114 * tb) / 65535
+        except tk.TclError:
+            tree_luminance = luminance
+        self._TREE_ZEBRA = self._shade_color(tree_bg, 0.08, lighten=(tree_luminance < 0.5))
+
+    def _shade_color(self, color, amount, lighten):
+        """Làm sáng (lighten=True) hoặc tối (False) 1 màu đi `amount` (0-1) — dùng để tự suy ra
+        màu sọc xen kẽ/hover từ đúng màu nền hiện có, thay vì đoán 1 màu cố định dễ lệch tông."""
+        r, g, b = (c / 257 for c in self.winfo_rgb(color))   # 0-65535 -> 0-255
+        if lighten:
+            r += (255 - r) * amount; g += (255 - g) * amount; b += (255 - b) * amount
+        else:
+            r *= (1 - amount); g *= (1 - amount); b *= (1 - amount)
+        return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+
+    # ---------- Sidebar 4 tab dọc của MÀN 2 (Phiếu trình / Văn bản / Nơi nhận / Luồng) ----------
+    # Tách theo nhóm việc thay vì gộp hết field lên 1 màn hình — mỗi lúc chỉ thấy 1 nhóm, đỡ
+    # "ngợp" cho người dùng phổ thông. Điều hướng tự do (không phải wizard bắt buộc theo thứ
+    # tự), nên mỗi tab có dấu ⚠ riêng nếu còn thiếu field bắt buộc (xem _refresh_readiness).
+    def _show_compose_tab(self, name):
+        for n, page in self._compose_tab_pages.items():
+            w = self._compose_tab_widgets[n]
+            active = (n == name)
+            bg = self._NAV_BG_ACTIVE if active else self._NAV_BG
+            fg = self._NAV_FG_ACTIVE if active else self._NAV_FG
+            accent_bg = self._NAV_ACCENT_ACTIVE if active else self._NAV_BG
+            w["row"].config(bg=bg)
+            w["accent"].config(bg=accent_bg)
+            w["label"].config(bg=bg, fg=fg, font=("", 10, "bold" if active else "normal"))
+            w["badge"].config(bg=bg)
+            if active:
+                page.pack(fill="both", expand=True)
+            else:
+                page.pack_forget()
+        self._compose_active_tab = name
+
+    def _set_compose_tab_badge(self, name, has_warning):
+        self._compose_tab_widgets[name]["badge"].config(text="⚠" if has_warning else "")
+
+    def _set_report_warning(self, msg):
+        self.report_warning_label.config(text="⚠ " + msg)
+
+    def _clear_report_warning(self):
+        self.report_warning_label.config(text="")
+
+    def _set_profile_warning(self, msg):
+        self.profile_warning_label.config(text="⚠ " + msg)
+
+    def _clear_profile_warning(self):
+        self.profile_warning_label.config(text="")
+
+    def _set_flow_warning(self, msg):
+        self.flow_warning_label.config(text="⚠ " + msg)
+
+    def _clear_flow_warning(self):
+        self.flow_warning_label.config(text="")
+
+    def _build_compose_tab_phieu_trinh(self, parent):
+        body = self._make_scrollable(parent)
+        g1 = ttk.LabelFrame(body, text="Phiếu trình (không gửi đi)", padding=6)
+        g1.pack(fill="x", padx=12, pady=(12, 0))
+        f = self._row(g1, "  File phiếu trình:", bold=True)
+        ttk.Entry(f, textvariable=self.file_report).pack(side="left", fill="x", expand=True)
+        ttk.Button(f, text="Chọn…", command=self._pick_file_report).pack(side="left")
+        self.extra_report = FileList(g1, "  + Tài liệu thêm (không gửi):")
+
+        f = self._row(body, "Hồ sơ công việc:")
+        self.work_profile = ttk.Combobox(f, values=[], state="readonly")
+        self.work_profile.pack(side="left", fill="x", expand=True)
+        self.profile_warning_label = ttk.Label(body, text="", foreground="#c62828",
+                                                wraplength=420, justify="left")
+        self.profile_warning_label.pack(anchor="w", padx=12, pady=(0, 4))
+
+        f = self._row(body, "Nội dung phiếu:")
+        # tk.Text nhiều dòng thay vì ttk.Entry 1 dòng — cùng lý do với "Trích yếu" ở DocumentSection.
+        self.report_content = tk.Text(f, height=3, wrap="word")
+        self.report_content.pack(side="left", fill="x", expand=True)
+        self.report_warning_label = ttk.Label(body, text="", foreground="#c62828",
+                                               wraplength=420, justify="left")
+        self.report_warning_label.pack(anchor="w", padx=12, pady=(0, 4))
+
+    def _build_compose_tab_van_ban(self, parent):
+        body = self._make_scrollable(parent)
+        self.doc_sections_frame = ttk.Frame(body)
+        self.doc_sections_frame.pack(fill="x", padx=12, pady=(12, 0))
+        self.doc_sections = []
+        self._add_document_section()
+        ttk.Button(body, text="+ Thêm văn bản", command=self._add_document_section).pack(
+            anchor="w", padx=12, pady=(4, 0))
+        ttk.Label(body, text="(File chính của mỗi văn bản = cái cần ký. Bỏ trống hết để thử "
+                              "nghiệm sẽ dùng tạm file phiếu trình.)",
+                  foreground="gray", wraplength=420).pack(anchor="w", padx=12, pady=(4, 10))
+
+        f = self._row(body, "Độ khẩn:")
+        self.priority = ttk.Combobox(f, values=[""] + sorted(ENUMS["priority"].keys()), state="readonly")
+        self.priority.set("Khẩn"); self.priority.pack(side="left", fill="x", expand=True)
+        f = self._row(body, "Độ mật:")
+        self.security = ttk.Combobox(f, values=[""] + sorted(ENUMS["security"].keys()), state="readonly")
+        self.security.set("Bình thường"); self.security.pack(side="left", fill="x", expand=True)
+
+    def _build_compose_tab_noi_nhan(self, parent):
+        body = self._make_scrollable(parent)
+        self.recip = RecipientBox(body, CAY, self.store)
+        self.recip.pack(fill="x", padx=12, pady=(12, 0))
+        self.auto_stamp_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(body, text="Tự đánh số chữ ký lên Phiếu trình + các Văn bản theo Luồng trình đã chọn",
+                        variable=self.auto_stamp_var).pack(anchor="w", padx=12, pady=(10, 0))
+
+    def _build_compose_tab_luong(self, parent):
+        body = self._make_scrollable(parent)
+        # Danh sách luồng LUÔN lấy động từ web (theo đúng tài khoản đang đăng nhập) — không còn
+        # 3 luồng cứng trong code nữa. Trong lúc chờ tải, combobox tạm hiện 1 dòng placeholder.
+        f = self._row(body, "Luồng trình:")
+        self.flow = ttk.Combobox(f, values=[self._FLOW_LOADING], state="readonly")
+        self.flow.set(self._FLOW_LOADING)
+        self.flow.pack(side="left", fill="x", expand=True)
+        self.flow.bind("<<ComboboxSelected>>", self._on_flow_changed)
+        self.flow_warning_label = ttk.Label(body, text="", foreground="#c62828",
+                                             wraplength=420, justify="left")
+        self.flow_warning_label.pack(anchor="w", padx=12, pady=(0, 4))
+
+        self.flow_panel = FlowSignerPanel(body, self.session, self.log, self.flow_store)
+        # chưa pack() — panel tự hiện/ẩn tuỳ luồng đang chọn đã có sẵn đủ người hay chưa
 
     # ---------- MÀN 2: SOẠN & LƯU NHÁP ----------
     def _show_main(self):
@@ -2686,107 +2989,80 @@ class App(tk.Tk):
         self.geometry(f"{w}x{h}")
         self.minsize(480, 360)
 
+        # Thanh trên cùng, NGOÀI notebook — hiện xuyên suốt mọi tab (khác nhãn "Đã đăng nhập"
+        # kiểu cũ, chỉ nằm trong tab "Soạn văn bản" nên khuất khi đang ở "Quản lý Phiếu trình").
+        topbar = ttk.Frame(self.container, padding=(12, 6)); topbar.pack(fill="x")
+        ttk.Label(topbar, text=f"Đã đăng nhập: {getattr(self, '_logged_user', '')}",
+                  foreground="#2e7d32", font=("", 9, "bold")).pack(side="left")
+        ttk.Button(topbar, text="Đăng xuất", command=self._do_logout).pack(side="right")
+
         notebook = ttk.Notebook(self.container)
         notebook.pack(fill="both", expand=True)
         compose_tab = ttk.Frame(notebook)
         manage_tab = ttk.Frame(notebook)
         notebook.add(compose_tab, text="Soạn văn bản")
         notebook.add(manage_tab, text="Quản lý Phiếu trình")
-        # Giữ lại để "Sửa" (xem _edit_in_compose) tự chuyển đúng sang tab này.
-        self._notebook, self._compose_tab = notebook, compose_tab
+        # Giữ lại để "Sửa" (xem _edit_in_compose) tự chuyển đúng sang tab này, và để Lưu/Trình
+        # xong tự nhảy sang "Quản lý Phiếu trình" (xem _open_manage_reports_tab).
+        self._notebook, self._compose_tab, self._manage_tab = notebook, compose_tab, manage_tab
 
-        pad = self._make_scrollable(compose_tab)
-        ttk.Label(pad, text=f"Đã đăng nhập: {getattr(self, '_logged_user', '')}",
-                  foreground="#2e7d32", font=("", 9, "bold")).pack(anchor="w", padx=12, pady=(10, 4))
-
-        # ---- Phần trên: 2 cột — trái = file đính kèm, phải = thông tin văn bản ----
-        # Dùng grid (không phải pack) với 2 cột "uniform" bằng nhau — pack(expand=True) trước
-        # đây KHÔNG đảm bảo chia đôi thật sự, cột nào có nội dung "đòi" nhiều chỗ hơn (vd cột
-        # trái nhiều Entry/Listbox) sẽ lấn cột kia, khiến cột phải bị bóp hẹp và cắt chữ.
-        top = ttk.Frame(pad); top.pack(fill="x", padx=12, pady=(4, 0))
-        top.columnconfigure(0, weight=1, uniform="cols")
-        top.columnconfigure(1, weight=1, uniform="cols")
-        left_col = ttk.Frame(top); left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        right_col = ttk.Frame(top); right_col.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-
-        # --- Cột trái: File — 2 nhóm, mỗi nhóm: file chính + tài liệu thêm ---
-        g1 = ttk.LabelFrame(left_col, text="Nhóm PHIẾU TRÌNH (không gửi đi)", padding=6)
-        g1.pack(fill="x")
-        f = self._row(g1, "  File phiếu trình:", bold=True)
-        ttk.Entry(f, textvariable=self.file_report).pack(side="left", fill="x", expand=True)
-        ttk.Button(f, text="Chọn…", command=self._pick_file_report).pack(side="left")
-        self.extra_report = FileList(g1, "  + Tài liệu thêm (không gửi):")
-
-        g2 = ttk.LabelFrame(left_col, text="Nhóm VĂN BẢN (gửi đi)", padding=6)
-        g2.pack(fill="x", pady=(6, 0))
-        self.doc_sections_frame = ttk.Frame(g2); self.doc_sections_frame.pack(fill="x")
-        self.doc_sections = []
-        self._add_document_section()
-        ttk.Button(g2, text="+ Thêm văn bản", command=self._add_document_section).pack(anchor="w", pady=(4, 0))
-        self.auto_stamp_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(g2, text="Tự đánh số chữ ký lên Phiếu trình + các Văn bản theo Luồng trình đã chọn",
-                        variable=self.auto_stamp_var).pack(anchor="w", pady=(2, 0))
-        ttk.Label(left_col, text="(File chính của mỗi văn bản = cái cần ký. Bỏ trống hết để thử nghiệm sẽ dùng tạm file phiếu trình.)",
-                  foreground="gray", wraplength=300).pack(anchor="w", pady=(4, 0))
-
-        # --- Cột phải: Luồng trình (dùng chung) + khẩn/mật + nội dung phiếu ---
-        # Danh sách luồng LUÔN lấy động từ web (theo đúng tài khoản đang đăng nhập) — không còn
-        # 3 luồng cứng trong code nữa. Trong lúc chờ tải, combobox tạm hiện 1 dòng placeholder.
+        # ---- Sidebar 4 tab dọc (trái) + nội dung tab (phải); CHẠY/trạng thái cố định ở dưới
+        # cùng, thấy được dù đang xem tab nào — xem _show_compose_tab()/_build_compose_tab_*().
         self._FLOW_LOADING = "(đang tải danh sách luồng…)"
         self._flow_by_name = {}
-        f = self._row(right_col, "Luồng trình:")
-        self.flow = ttk.Combobox(f, values=[self._FLOW_LOADING], state="readonly")
-        self.flow.set(self._FLOW_LOADING)
-        self.flow.pack(side="left", fill="x", expand=True)
-        self.flow.bind("<<ComboboxSelected>>", self._on_flow_changed)
-
-        self.flow_panel = FlowSignerPanel(right_col, self.session, self.log, self.flow_store)
-        # chưa pack() — panel tự hiện/ẩn tuỳ luồng đang chọn đã có sẵn đủ người hay chưa
-
-        # Hồ sơ công việc — BẮT BUỘC lấy đúng theo tài khoản đang đăng nhập (xem
-        # fetch_prepare_insert_data): dùng nhầm hồ sơ của tài khoản khác vẫn "lưu thành công"
-        # nhưng phiếu trình lạc mất, không thấy trong thùng nháp.
         self._profile_by_name = {}
-        f = self._row(right_col, "Hồ sơ công việc:")
-        self.work_profile = ttk.Combobox(f, values=[], state="readonly")
-        self.work_profile.pack(side="left", fill="x", expand=True)
 
-        # Khẩn + mật
-        f = self._row(right_col, "Độ khẩn:")
-        self.priority = ttk.Combobox(f, values=[""] + sorted(ENUMS["priority"].keys()), state="readonly")
-        self.priority.set("Khẩn"); self.priority.pack(side="left", fill="x", expand=True)
-        f = self._row(right_col, "Độ mật:")
-        self.security = ttk.Combobox(f, values=[""] + sorted(ENUMS["security"].keys()), state="readonly")
-        self.security.set("Bình thường"); self.security.pack(side="left", fill="x", expand=True)
+        compose_root = ttk.Frame(compose_tab); compose_root.pack(fill="both", expand=True)
+        body = ttk.Frame(compose_root); body.pack(fill="both", expand=True)
 
-        # Nội dung phiếu trình
-        f = self._row(right_col, "Nội dung phiếu:")
-        # tk.Text nhiều dòng thay vì ttk.Entry 1 dòng — cùng lý do với "Trích yếu" ở DocumentSection.
-        self.report_content = tk.Text(f, height=2, wrap="word")
-        self.report_content.pack(side="left", fill="x", expand=True)
+        self._compute_nav_colors()
 
-        # ---- Phần dưới: Nơi nhận (rộng hết chiều ngang) ----
-        self.recip = RecipientBox(pad, CAY, self.store)
-        self.recip.pack(fill="x", padx=12, pady=(10, 0))
+        nav = tk.Frame(body, bg=self._NAV_BG, width=150); nav.pack(side="left", fill="y")
+        nav.pack_propagate(False)
+        ttk.Separator(body, orient="vertical").pack(side="left", fill="y")
+        content_area = ttk.Frame(body); content_area.pack(side="left", fill="both", expand=True)
 
-        # Nút
-        f = ttk.Frame(pad); f.pack(fill="x", padx=12, pady=8)
-        self.check_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(f, text="Chỉ kiểm tra (không ghi gì) — bật cho lần chạy đầu",
-                        variable=self.check_var).pack(anchor="w")
-        ttk.Button(f, text="CHẠY", command=self._run).pack(side="left", pady=4)
-        ttk.Button(f, text="Làm mới form", command=self._confirm_reset_form).pack(
+        COMPOSE_TABS = ("Phiếu trình", "Văn bản", "Nơi nhận", "Luồng")
+        self._compose_tab_pages = {}
+        self._compose_tab_widgets = {}
+        for name in COMPOSE_TABS:
+            page = ttk.Frame(content_area)
+            self._compose_tab_pages[name] = page
+
+            row = tk.Frame(nav, bg=self._NAV_BG); row.pack(fill="x")
+            accent = tk.Frame(row, width=4, bg=self._NAV_BG); accent.pack(side="left", fill="y")
+            label = tk.Label(row, text=name, bg=self._NAV_BG, fg=self._NAV_FG, anchor="w",
+                              padx=12, pady=10, font=("", 10))
+            label.pack(side="left", fill="both", expand=True)
+            badge = tk.Label(row, text="", bg=self._NAV_BG, fg="#c62828", font=("", 10, "bold"))
+            badge.pack(side="right", padx=(0, 10))
+            for w in (row, accent, label, badge):
+                w.bind("<Button-1>", lambda _e, n=name: self._show_compose_tab(n))
+            self._compose_tab_widgets[name] = {"row": row, "accent": accent, "label": label, "badge": badge}
+
+        self._build_compose_tab_phieu_trinh(self._compose_tab_pages["Phiếu trình"])
+        self._build_compose_tab_van_ban(self._compose_tab_pages["Văn bản"])
+        self._build_compose_tab_noi_nhan(self._compose_tab_pages["Nơi nhận"])
+        self._build_compose_tab_luong(self._compose_tab_pages["Luồng"])
+        self._show_compose_tab(COMPOSE_TABS[0])
+
+        # ---- Cố định dưới cùng: nút CHẠY + trạng thái sẵn sàng ----
+        footer = ttk.Frame(compose_root); footer.pack(fill="x", padx=12, pady=8)
+        self.check_var = tk.BooleanVar(value=False)   # "Chỉ kiểm tra" — ẩn khỏi UI, không dùng nữa
+        ttk.Button(footer, text="CHẠY", command=self._run).pack(side="left", pady=4)
+        ttk.Button(footer, text="Làm mới form", command=self._confirm_reset_form).pack(
             side="left", padx=(8, 0), pady=4)
-        self.readiness_label = ttk.Label(f, text="", font=("", 9))
+        self.readiness_label = ttk.Label(footer, text="", font=("", 9))
         self.readiness_label.pack(side="left", padx=(10, 0))
-        self._refresh_readiness()   # tự cập nhật định kỳ — xem _refresh_readiness()
 
-        # Log
-        self.logbox = tk.Text(pad, height=10, bg="#101418", fg="#d0d0d0")
-        self.logbox.pack(fill="both", expand=True, padx=12, pady=(6, 12))
+        # Log kỹ thuật — không còn hiện trong giao diện chính (quá phức tạp với người dùng phổ
+        # thông); self.log() vẫn cần 1 nơi để ghi vào nên giữ 1 Text KHÔNG pack() ra màn hình.
+        self.logbox = tk.Text(compose_root)
 
-        ttk.Label(pad, text=AUTHOR_MARK, font=("", 8), foreground="#999999").pack(
+        ttk.Label(compose_root, text=AUTHOR_MARK, font=("", 8), foreground="#999999").pack(
             anchor="e", padx=12, pady=(0, 6))
+
+        self._refresh_readiness()   # tự cập nhật định kỳ — xem _refresh_readiness()
 
         self._fetch_flow_data()   # sau cùng — logbox đã có sẵn để self.log() gọi từ luồng nền
 
@@ -2827,9 +3103,9 @@ class App(tk.Tk):
         except Exception as e:
             err = str(e)
         if err:
-            self.after(0, lambda: self.log(
-                f"• Không đọc nhanh được .docx để tự điền nội dung phiếu: {err} — vẫn có thể "
-                "tự điền lại sau khi bấm CHẠY (lúc đó có bản PDF)."))
+            msg = (f"Không đọc nhanh được .docx để tự điền nội dung phiếu: {err} — vẫn có thể "
+                   "tự điền lại sau khi bấm CHẠY (lúc đó có bản PDF).")
+            self.after(0, lambda: self._set_report_warning(msg))
             return
         self.after(0, self._apply_report_extract, path, content, None)
 
@@ -2845,15 +3121,15 @@ class App(tk.Tk):
         if path != self.file_report.get():
             return   # đã chọn file phiếu trình khác trong lúc đọc — bỏ kết quả cũ
         if err:
-            self.log(f"• Không đọc được nội dung phiếu trình để tự điền: {err}")
+            self._set_report_warning(f"Không đọc được nội dung phiếu trình để tự điền: {err}")
             return
         if content:
             self.report_content.delete("1.0", "end")
             self.report_content.insert("1.0", content)
-            self.log(f"• Đã tự điền Nội dung phiếu từ file phiếu trình: {content!r}")
+            self._clear_report_warning()
         else:
-            self.log("• Không nhận ra được nội dung trong file phiếu trình (mẫu khác/PDF quét "
-                      "ảnh không có lớp chữ) — điền tay nếu cần.")
+            self._set_report_warning("Không nhận ra được nội dung trong file phiếu trình (mẫu "
+                                      "khác/PDF quét ảnh không có lớp chữ) — điền tay nếu cần.")
 
     FLOW_SEPARATOR = "──────── Luồng khác (từ web) ────────"
     FLOW_QUEN_MAX = 5   # số luồng "quen" tối đa hiện ở đầu combobox (ghim + hay dùng nhất)
@@ -2866,7 +3142,9 @@ class App(tk.Tk):
             try:
                 flows, profiles = fetch_prepare_insert_data(self.session, self.log)
             except Exception as e:
-                self.log(f"• Không lấy được danh sách luồng/hồ sơ công việc từ web: {e}")
+                msg = f"Không lấy được danh sách luồng/hồ sơ công việc từ web: {e}"
+                self.after(0, lambda: self._set_flow_warning(msg))
+                self.after(0, lambda: self._set_profile_warning(msg))
                 return
             self.after(0, lambda: self._apply_flow_list(flows))
             self.after(0, lambda: self._apply_work_profiles(profiles))
@@ -2893,8 +3171,9 @@ class App(tk.Tk):
             values += [fl["name"] for fl in rest]
 
         if not values:
-            self.log("   — Không lấy được luồng nào từ web (giữ nguyên ô trống, tự kiểm tra lại mạng).")
+            self._set_flow_warning("Không lấy được luồng nào từ web (giữ nguyên ô trống, tự kiểm tra lại mạng).")
             return
+        self._clear_flow_warning()
         self.flow.config(values=values)
         self._select_default_flow()   # tải khung chọn người ngay cho lựa chọn mặc định
 
@@ -2908,8 +3187,9 @@ class App(tk.Tk):
 
     def _apply_work_profiles(self, profiles):
         if not profiles:
-            self.log("   — Không tìm thấy hồ sơ công việc nào của tài khoản này trên web.")
+            self._set_profile_warning("Không tìm thấy hồ sơ công việc nào của tài khoản này trên web.")
             return
+        self._clear_profile_warning()
         self._profile_by_name = {p["name"]: p["fileId"] for p in profiles}
         self.work_profile.config(values=list(self._profile_by_name.keys()))
         self._select_default_work_profile()
@@ -2996,6 +3276,9 @@ class App(tk.Tk):
         self._select_default_flow()
         self._select_default_work_profile()
 
+        self._clear_report_warning()
+        self._clear_profile_warning()
+        self._clear_flow_warning()
         self.logbox.delete("1.0", "end")
         self.log("— Đã tự làm mới form, sẵn sàng cho phiếu trình mới —")
         self._refresh_readiness()
@@ -3036,24 +3319,30 @@ class App(tk.Tk):
 
     def _refresh_readiness(self):
         """1 dòng trạng thái cạnh nút CHẠY — liếc là biết đã đủ để bấm chưa, khỏi phải tự rà
-        từng ô. Tự cập nhật định kỳ (không cần nối callback riêng vào từng ô/luồng/nơi nhận —
-        đơn giản hơn, chi phí không đáng kể)."""
-        missing = []
+        từng ô. Đồng thời gắn dấu ⚠ lên đúng tab (sidebar) còn thiếu, để biết cần quay lại tab
+        nào mà không phải tự dò qua cả 4 tab. Tự cập nhật định kỳ (không cần nối callback riêng
+        vào từng ô/luồng/nơi nhận — đơn giản hơn, chi phí không đáng kể)."""
+        missing_by_tab = {"Phiếu trình": [], "Văn bản": [], "Nơi nhận": [], "Luồng": []}
         if not self.file_report.get():
-            missing.append("File phiếu trình")
+            missing_by_tab["Phiếu trình"].append("File phiếu trình")
         if not self.report_content.get("1.0", "end-1c").strip():
-            missing.append("Nội dung phiếu")
+            missing_by_tab["Phiếu trình"].append("Nội dung phiếu")
         multi = len(self.doc_sections) > 1
         for i, ds in enumerate(self.doc_sections):
             tag = f" (văn bản {i+1})" if multi else ""
             if not ds.abstract.get("1.0", "end-1c").strip():
-                missing.append(f"Trích yếu văn bản{tag}")
+                missing_by_tab["Văn bản"].append(f"Trích yếu văn bản{tag}")
             if not ds.code.get().strip():
-                missing.append(f"Số/ký hiệu{tag}")
+                missing_by_tab["Văn bản"].append(f"Số/ký hiệu{tag}")
         if not any(self.recip.get(c) for c, _ in RecipientBox.CATS):
-            missing.append("Nơi nhận")
+            missing_by_tab["Nơi nhận"].append("Nơi nhận")
         if not self.flow_panel.is_ready():
-            missing.append("chọn người ký cho luồng")
+            missing_by_tab["Luồng"].append("chọn người ký cho luồng")
+
+        for name, lst in missing_by_tab.items():
+            self._set_compose_tab_badge(name, bool(lst))
+
+        missing = [m for lst in missing_by_tab.values() for m in lst]
         if missing:
             self.readiness_label.config(text="⚠ Còn thiếu: " + ", ".join(missing), foreground="#c62828")
         else:
@@ -3134,17 +3423,16 @@ class App(tk.Tk):
         đọc từ chính bản PDF vừa có (đáng tin hơn/đầy đủ hơn bản đọc nhanh lúc chọn file, vì
         giờ đã chắc chắn có PDF). CHỈ điền ô đang trống, không đè lên bất kỳ ô nào người dùng
         (hoặc bước đọc nhanh lúc chọn file) đã điền trước đó."""
-        self.log(f"• Đã chuyển sang PDF: {os.path.basename(pdf_path)}")
         if kind == "report":
             self.file_report.set(pdf_path)
             try:
                 content = extract_phieu_trinh_content(pdf_path)
             except Exception as e:
-                self.log(f"• Không đọc được nội dung phiếu trình từ PDF vừa chuyển: {e}")
+                self._set_report_warning(f"Không đọc được nội dung phiếu trình từ PDF vừa chuyển: {e}")
                 return
             if content and not self.report_content.get("1.0", "end-1c").strip():
                 self.report_content.delete("1.0", "end"); self.report_content.insert("1.0", content)
-                self.log(f"• Đã tự điền thêm Nội dung phiếu từ PDF vừa chuyển: {content!r}")
+                self._clear_report_warning()
             return
 
         ds = self.doc_sections[idx]
@@ -3152,7 +3440,7 @@ class App(tk.Tk):
         try:
             doc_type, code, abstract = extract_draft_fields(pdf_path)
         except Exception as e:
-            self.log(f"• Không đọc được văn bản từ PDF vừa chuyển: {e}")
+            ds._set_warning(f"Không đọc được văn bản từ PDF vừa chuyển: {e}")
             return
         if doc_type and not ds.doc_type.get():
             ds.doc_type.set(doc_type)
@@ -3167,6 +3455,7 @@ class App(tk.Tk):
             ds.abstract.delete("1.0", "end"); ds.abstract.insert("1.0", abstract)
             if not self.report_content.get("1.0", "end-1c").strip():
                 self.report_content.delete("1.0", "end"); self.report_content.insert("1.0", abstract)
+        ds._clear_warning()
 
     def _run_after_conversion(self):
         """Phần logic CHẠY thật sự — chạy sau khi mọi file .docx (nếu có) đã chuyển xong sang
@@ -3219,40 +3508,143 @@ class App(tk.Tk):
     def _build_manage_reports_tab(self, parent):
         top = ttk.Frame(parent); top.pack(fill="x", padx=8, pady=(8, 4))
         now = datetime.now()
-        self.mgmt_date_from = tk.StringVar(value=(now - timedelta(days=90)).strftime("%Y-%m-%d"))
+        self.mgmt_date_from = tk.StringVar(value=(now - timedelta(days=30)).strftime("%Y-%m-%d"))
         self.mgmt_date_to = tk.StringVar(value=now.strftime("%Y-%m-%d"))
         ttk.Label(top, text="Từ ngày:").pack(side="left")
         ttk.Entry(top, textvariable=self.mgmt_date_from, width=12).pack(side="left", padx=(2, 8))
         ttk.Label(top, text="Đến ngày:").pack(side="left")
         ttk.Entry(top, textvariable=self.mgmt_date_to, width=12).pack(side="left", padx=(2, 8))
-        ttk.Label(top, text="(định dạng NĂM-THÁNG-NGÀY, vd 2026-08-01 — mặc định 3 tháng gần nhất)",
+        ttk.Label(top, text="(định dạng NĂM-THÁNG-NGÀY, vd 2026-08-01 — mặc định 1 tháng gần nhất)",
                   foreground="gray").pack(side="left")
         ttk.Button(top, text="↻ Làm mới danh sách", command=self._reload_report_lists).pack(side="left", padx=(8, 0))
 
-        sub = ttk.Notebook(parent)
-        sub.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        # Tìm theo từ khoá trong "Nội dung" — lọc NGAY trên danh sách đã tải (không gọi mạng
+        # lại), áp dụng cho cả 3 tab cùng lúc — giúp bớt rối khi danh sách dài mà không phải
+        # đổi cách hiển thị từng dòng.
+        self.mgmt_search = tk.StringVar()
+        self._mgmt_search_job = None
+        ttk.Label(top, text="Tìm nội dung:").pack(side="left", padx=(16, 0))
+        search_entry = ttk.Entry(top, textvariable=self.mgmt_search, width=24)
+        search_entry.pack(side="left", padx=(2, 0))
+        search_entry.bind("<KeyRelease>", self._on_mgmt_search_key)
+
+        # Sidebar dọc cho 3 trạng thái (Đang xử lý/Nháp/Hoàn thành) — cùng kiểu nav dọc với
+        # "Soạn văn bản" (xem _show_compose_tab), dùng chung màu self._NAV_* đã set ở đó.
+        body = ttk.Frame(parent); body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        nav = tk.Frame(body, bg=self._NAV_BG, width=150); nav.pack(side="left", fill="y")
+        nav.pack_propagate(False)
+        ttk.Separator(body, orient="vertical").pack(side="left", fill="y")
+        content_area = ttk.Frame(body); content_area.pack(side="left", fill="both", expand=True)
+
+        self._mgmt_tab_frames = {}   # which -> Frame nội dung, để _show_mgmt_tab() hiện đúng trang
+        self._mgmt_tab_widgets = {}  # which -> {row, accent, label}, để tô màu tab đang chọn
         self.mgmt_trees = {}
         self.mgmt_items = {}
         for which, label in self.MGMT_TABS:
-            tab = ttk.Frame(sub)
-            sub.add(tab, text=label)
-            self.mgmt_trees[which] = self._build_report_tree(tab, which)
+            page = ttk.Frame(content_area)
+            self._mgmt_tab_frames[which] = page
+
+            row = tk.Frame(nav, bg=self._NAV_BG); row.pack(fill="x")
+            accent = tk.Frame(row, width=4, bg=self._NAV_BG); accent.pack(side="left", fill="y")
+            lbl = tk.Label(row, text=label, bg=self._NAV_BG, fg=self._NAV_FG, anchor="w",
+                           padx=12, pady=10, font=("", 10))
+            lbl.pack(side="left", fill="both", expand=True)
+            for w in (row, accent, lbl):
+                w.bind("<Button-1>", lambda _e, w=which: self._show_mgmt_tab(w))
+            self._mgmt_tab_widgets[which] = {"row": row, "accent": accent, "label": lbl}
+
+            self.mgmt_trees[which] = self._build_report_tree(page, which)
             self.mgmt_items[which] = {}   # iid -> item dict đầy đủ
+        self._show_mgmt_tab(self.MGMT_TABS[0][0])
         self._reload_report_lists()   # tự làm mới 1 lần ngay khi mở màn hình chính (mỗi lần đăng nhập)
+
+    def _show_mgmt_tab(self, which):
+        for w, page in self._mgmt_tab_frames.items():
+            wd = self._mgmt_tab_widgets[w]
+            active = (w == which)
+            bg = self._NAV_BG_ACTIVE if active else self._NAV_BG
+            fg = self._NAV_FG_ACTIVE if active else self._NAV_FG
+            accent_bg = self._NAV_ACCENT_ACTIVE if active else self._NAV_BG
+            wd["row"].config(bg=bg)
+            wd["accent"].config(bg=accent_bg)
+            wd["label"].config(bg=bg, fg=fg, font=("", 10, "bold" if active else "normal"))
+            if active:
+                page.pack(fill="both", expand=True)
+            else:
+                page.pack_forget()
+        self._mgmt_active_tab = which
+
+    def _open_manage_reports_tab(self, which):
+        """Nhảy sang tab "Quản lý Phiếu trình" + đúng sub-tab `which` ("processing"/"draft"),
+        rồi làm mới danh sách — gọi sau khi Lưu/Trình xong (xem PreviewWindow._finish_post_send)."""
+        self._notebook.select(self._manage_tab)
+        self._show_mgmt_tab(which)
+        self._reload_report_lists()
+
+    MGMT_CONTENT_WRAP = 55   # số ký tự/dòng khi bọc cột "Nội dung" — xem _render_mgmt_tree
 
     def _build_report_tree(self, parent, which):
         wrap = ttk.Frame(parent); wrap.pack(fill="both", expand=True)
         cols = [c[0] for c in self.MGMT_COLUMNS]
-        tree = ttk.Treeview(wrap, columns=cols, show="headings", height=14)
+        # Style riêng "Reports.Treeview" (không đụng style "Treeview" mặc định — PreviewWindow
+        # cũng có 1 Treeview khác, dùng cho cây file, không nên bị tăng rowheight lây) — 2 dòng
+        # cho cột "Nội dung" (xem _render_mgmt_tree) cần hàng cao hơn mặc định 1 dòng.
+        style = ttk.Style(self)
+        line_h = tkfont.nametofont("TkDefaultFont").metrics("linespace")
+        style.configure("Reports.Treeview", rowheight=line_h * 2 + 12)
+        tree = ttk.Treeview(wrap, columns=cols, show="headings", height=10, style="Reports.Treeview")
         for key, title, width in self.MGMT_COLUMNS:
             tree.heading(key, text=title)
             tree.column(key, width=width, anchor="w")
+        # Sọc xen kẽ (xem _compute_nav_colors) — dòng dài na ná nhau (nhiều phiếu cùng loại nội
+        # dung) dễ đọc nhầm sang dòng bên cạnh nếu không có gì phân biệt theo hàng.
+        tree.tag_configure("odd", background=self._TREE_ZEBRA)
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
         tree.bind("<Double-1>", lambda e, w=which: self._open_report_detail(w))
         return tree
+
+    def _on_mgmt_search_key(self, _event=None):
+        if self._mgmt_search_job is not None:
+            self.after_cancel(self._mgmt_search_job)
+        self._mgmt_search_job = self.after(200, self._debounced_mgmt_filter)
+
+    def _debounced_mgmt_filter(self):
+        self._mgmt_search_job = None
+        for which, _label in self.MGMT_TABS:
+            self._render_mgmt_tree(which)
+
+    def _render_mgmt_tree(self, which):
+        """Vẽ lại bảng của 1 tab trạng thái từ self.mgmt_items[which] (đã tải sẵn, không gọi
+        mạng lại) — áp từ khoá tìm (nếu có) + bọc "Nội dung" tối đa 2 dòng thay vì cắt "…" mất
+        chữ + tô sọc xen kẽ theo đúng thứ tự dòng đang hiện (không theo thứ tự tải gốc, để sọc
+        luôn đều dù đã lọc bớt)."""
+        tree = self.mgmt_trees[which]
+        tree.delete(*tree.get_children())
+        kw = self.mgmt_search.get().strip().lower()
+        for i, (iid, it) in enumerate(self.mgmt_items[which].items()):
+            content = (it.get("content") or "").strip()
+            if kw and kw not in content.lower():
+                continue
+            date = (it.get("createdDate") or "").replace("T", " ")
+            holder = it.get("receiveUser") or ""
+            finish = (it.get("finishDate") or "").replace("T", " ")
+            lines = textwrap.wrap(content, width=self.MGMT_CONTENT_WRAP) or [""]
+            if len(lines) > 2:
+                lines = lines[:2]
+                lines[-1] = lines[-1].rstrip() + "…"
+            wrapped = "\n".join(lines)
+            tags = ("odd",) if i % 2 else ()
+            tree.insert("", "end", iid=iid, values=(date, wrapped, holder, finish), tags=tags)
+
+    def _apply_report_list(self, which, items):
+        self.mgmt_items[which] = {}
+        for it in items:
+            iid = str(it.get("reportId"))
+            self.mgmt_items[which][iid] = it
+        self._render_mgmt_tree(which)
 
     def _reload_report_lists(self):
         date_from, date_to = self.mgmt_date_from.get().strip(), self.mgmt_date_to.get().strip()
@@ -3263,11 +3655,25 @@ class App(tk.Tk):
             messagebox.showerror("Sai định dạng ngày",
                                   "Từ ngày/Đến ngày phải theo định dạng NĂM-THÁNG-NGÀY, vd 2026-08-01.")
             return
+        # 3 danh sách (Đang xử lý/Nháp/Hoàn thành) tải song song, mỗi cái 1 luồng nền riêng —
+        # dùng chung 1 cửa sổ chờ, đóng lại khi cả 3 đã xong (kể cả cái nào lỗi cũng tính là
+        # "xong" — không treo cửa sổ chờ mãi chỉ vì 1 danh sách tải hỏng).
+        total = len(self.MGMT_TABS)
+        dlg = _ConvertingDialog(self, f"Đang tải danh sách phiếu trình (0/{total})…")
+        state = {"done": 0}
         for which, _label in self.MGMT_TABS:
-            self._load_report_list(which, date_from, date_to)
+            self._load_report_list(which, date_from, date_to, dlg, state, total)
 
-    def _load_report_list(self, which, date_from, date_to):
+    def _mark_report_list_done(self, dlg, state, total):
+        state["done"] += 1
+        if state["done"] >= total:
+            dlg.close()
+        else:
+            dlg.set_status(f"Đang tải danh sách phiếu trình ({state['done']}/{total})…")
+
+    def _load_report_list(self, which, date_from, date_to, dlg, state, total):
         s = self.session
+        label = dict(self.MGMT_TABS)[which]
         def worker():
             try:
                 if which == "processing":
@@ -3285,23 +3691,12 @@ class App(tk.Tk):
                                                               date_to=date_to, count=200)
                              if it.get("status") not in (1, 3)]
             except Exception as e:
-                self.after(0, lambda: self.log(f"• Không tải được danh sách phiếu trình ({which}): {e!r}"))
+                self.after(0, lambda: self.log(f"• Không tải được danh sách '{label}': {e!r}"))
+                self.after(0, lambda: self._mark_report_list_done(dlg, state, total))
                 return
             self.after(0, lambda: self._apply_report_list(which, items))
+            self.after(0, lambda: self._mark_report_list_done(dlg, state, total))
         threading.Thread(target=worker, daemon=True).start()
-
-    def _apply_report_list(self, which, items):
-        tree = self.mgmt_trees[which]
-        tree.delete(*tree.get_children())
-        self.mgmt_items[which] = {}
-        for it in items:
-            date = (it.get("createdDate") or "").replace("T", " ")
-            content = (it.get("content") or "").strip()
-            holder = it.get("receiveUser") or ""
-            finish = (it.get("finishDate") or "").replace("T", " ")
-            iid = str(it.get("reportId"))
-            tree.insert("", "end", iid=iid, values=(date, content, holder, finish))
-            self.mgmt_items[which][iid] = it
 
     def _open_report_detail(self, which):
         tree = self.mgmt_trees[which]
@@ -3334,13 +3729,21 @@ class App(tk.Tk):
         tmpdir = tempfile.mkdtemp(prefix="voffice_edit_")
         self._edit_tmpdirs.append(tmpdir)   # dọn ở _cleanup_edit_tmpdirs (Làm mới form / thoát)
 
+        # Toàn bộ việc tải (file phiếu trình + từng văn bản) có thể mất vài giây tới vài chục
+        # giây tuỳ số file — hiện cửa sổ chờ nhỏ (giống lúc chuyển .docx->PDF, xem _run) để
+        # người dùng biết đang có việc chạy ngầm, không phải chương trình treo/không phản hồi.
+        dlg = _ConvertingDialog(self, f"Đang tải dữ liệu phiếu #{report_id} để sửa…")
+
         def worker():
             result = {"report_local": None, "extra_locals": [], "docs": [], "report_existing_attach_ids": []}
             # 1. File của chính Phiếu trình (+ tài liệu thêm) — link kèm token đã có sẵn
             #    trong attachPathIcons của item (không cần API mới).
             hrefs = re.findall(r"href='([^']+)'[^>]*>\s*<img[^>]*title='([^']*)'",
                                 item.get("attachPathIcons") or "")
+            n_report_files = len(hrefs)
             for i, (href, title) in enumerate(hrefs):
+                self.after(0, lambda i=i, title=title: dlg.set_status(
+                    f"Đang tải file phiếu trình ({i+1}/{n_report_files}): {title}…"))
                 url = BASE + "/" + html_unescape(href)
                 m = re.search(r"attachId=(\d+)", href)
                 if m:
@@ -3363,9 +3766,15 @@ class App(tk.Tk):
                     self.log(f"   • Không tải được file phiếu trình '{title}': {e!r}")
 
             # 2. Chi tiết từng văn bản (Loại VB/Số/Trích yếu/Nơi nhận/Khẩn-mật/Người ký).
+            self.after(0, lambda: dlg.set_status("Đang tải danh sách văn bản…"))
             attachs = fetch_report_attachs(s, report_id, self.log)
-            for doc_item in fetch_document_of_report(s, report_id, self.log):
+            doc_items = fetch_document_of_report(s, report_id, self.log)
+            n_docs = len(doc_items)
+            for di, doc_item in enumerate(doc_items, start=1):
                 pid = doc_item.get("publishDocumentId")
+                self.after(0, lambda di=di, doc_item=doc_item: dlg.set_status(
+                    f"Đang tải văn bản ({di}/{n_docs}): "
+                    f"{doc_item.get('code') or doc_item.get('documentType') or '(chưa rõ số/loại)'}…"))
                 own_files = [a for a in attachs if a.get("documentId") == pid]
                 doc = {
                     "doc_type": doc_item.get("documentType") or "",
@@ -3417,16 +3826,14 @@ class App(tk.Tk):
                             self.log(f"   • Không tải được file '{name}' (publishDocumentId={pid}): {e!r} "
                                      "— tự chọn lại file này trước khi bấm CHẠY.")
                 result["docs"].append(doc)
-            self.after(0, lambda: self._apply_edit_data(item, result))
+            self.after(0, lambda: (dlg.close(), self._apply_edit_data(item, result)))
         threading.Thread(target=worker, daemon=True).start()
 
     def _apply_edit_data(self, item, result):
         if result["report_local"]:
             self.file_report.set(result["report_local"])
         for p in result["extra_locals"]:
-            if p not in self.extra_report.paths:
-                self.extra_report.paths.append(p)
-                self.extra_report.lb.insert("end", os.path.basename(p))
+            self.extra_report.add_path(p)
         self._editing_report_existing_attach_ids = result.get("report_existing_attach_ids") or []
 
         self.report_content.delete("1.0", "end")
@@ -3444,9 +3851,7 @@ class App(tk.Tk):
             if doc.get("local_file"):
                 ds.file_draft.set(doc["local_file"])
             for p in doc.get("extra_locals") or []:
-                if p not in ds.extra.paths:
-                    ds.extra.paths.append(p)
-                    ds.extra.lb.insert("end", os.path.basename(p))
+                ds.extra.add_path(p)
             ds._existing_pid = doc.get("existing_pid")
             ds._existing_attach_ids = doc.get("existing_attach_ids") or []
 
@@ -3464,6 +3869,11 @@ class App(tk.Tk):
         self.log(f"— Đã điền xong dữ liệu phiếu #{item.get('reportId')} — kiểm tra lại rồi bấm CHẠY. "
                   "Luồng trình/Người ký KHÔNG tự chọn lại — tự chọn lại nếu cần. —")
         self._refresh_readiness()
+        # Dữ liệu vừa tự điền nằm rải trên nhiều tab (Văn bản/Nơi nhận) — với giao diện 4 tab
+        # mới, nếu không tự nhảy sang, người dùng đang đứng ở tab khác (vd "Phiếu trình") sẽ
+        # tưởng nhầm là chưa điền được gì. Nhảy sang "Văn bản" trước (file/nội dung cần soát kỹ
+        # nhất trước khi bấm CHẠY) — "Nơi nhận" xem badge cảnh báo trên sidebar để biết cần ghé qua.
+        self._show_compose_tab("Văn bản")
 
     def _fill_recipients_best_effort(self, doc):
         """Điền lại Nơi nhận từ TÊN (không có ID) bằng khớp gần nhất trong cây đơn vị — best
@@ -3710,6 +4120,8 @@ class PreviewWindow(tk.Toplevel):
                                      # cho _on_close biết cần làm mới form chính hay không
         self._current_phase = None  # phase (xem PIPELINE_PHASES) đang chạy — để biết tô đỏ
                                      # đúng bước nào nếu lỗi
+        self._log_window = None     # SendLogWindow độc lập, mở ra mỗi lần bấm Lưu/Trình (_send)
+        self._post_send_target_tab = None   # "processing"/"draft" — xem _start_post_send_close
 
         self.title("Xem trước & Gửi")
         self.geometry("1180x760")
@@ -4155,6 +4567,9 @@ class PreviewWindow(tk.Toplevel):
     def _set_phase(self, key):
         self._current_phase = key
         self.checklist.mark_running(key)
+        if self._log_window is not None:
+            label = dict(PIPELINE_PHASES).get(key, key)
+            self._log_window.append(f"• {label}...")
 
     def _render_result_banner(self, result):
         """`result`: dict trả về từ run_pipeline (xem verify_report_saved) — KHÔNG suy đoán từ
@@ -4212,6 +4627,9 @@ class PreviewWindow(tk.Toplevel):
 
     # ---------- Gửi thật ----------
     def _plog(self, msg):
+        # Log kỹ thuật (HTTP, phản hồi server...) chỉ vào logbox ẩn ("Xem chi tiết kỹ thuật")
+        # như cũ — SendLogWindow chỉ hiện đúng các bước lớn (xem _set_phase), không lặp lại log
+        # chi tiết ở đây để giữ cửa sổ đó gọn, dễ đọc.
         self.logbox.insert("end", msg + "\n"); self.logbox.see("end"); self.update_idletasks()
 
     def _send(self, sign):
@@ -4233,6 +4651,10 @@ class PreviewWindow(tk.Toplevel):
         self.checklist.reset()
         self.banner_label.pack_forget()
         self.logbox.delete("1.0", "end")
+        # Cửa sổ nhật ký riêng (xem SendLogWindow) — độc lập với PreviewWindow, để thấy tiến
+        # trình dù cửa sổ này có bị che khuất; _plog/_set_phase tự mirror sang đây bên dưới.
+        title = "Nhật ký — Trình văn bản" if sign == "1" else "Nhật ký — Lưu dự thảo"
+        self._log_window = SendLogWindow(self, title, self._finish_post_send)
         self._plog("=== BẮT ĐẦU TRÌNH ===" if sign == "1" else "=== BẮT ĐẦU LƯU DỰ THẢO ===")
 
         def phase_cb(key):
@@ -4245,18 +4667,52 @@ class PreviewWindow(tk.Toplevel):
                 err_text = str(e)   # tính ngay trong khối except — "e" bị Python xoá khi except kết thúc
                 self._plog("\n✖ DỪNG: " + err_text)
                 self.after(0, lambda: self._render_error_banner(err_text))
+                self.after(0, lambda: self._start_post_send_close(None))
             except Exception as e:
                 err_text = repr(e)
                 self._plog("\n✖ LỖI KHÔNG NGỜ: " + err_text)
                 self.after(0, lambda: self._render_error_banner(err_text))
+                self.after(0, lambda: self._start_post_send_close(None))
             else:
                 self._submitted_ok = True   # đã ghi lên hệ thống thật (kể cả banner "ambiguous")
                 self.after(0, lambda: (self.checklist.complete_all(), self._render_result_banner(result)))
+                self.after(0, lambda: self._start_post_send_close(result))
             finally:
                 self._sending = False
                 self.after(0, lambda: self.btn_send.config(state="normal"))
                 self.after(0, lambda: self.btn_submit.config(state="normal"))
         threading.Thread(target=worker, daemon=True).start()
+
+    def _start_post_send_close(self, result):
+        """Gọi ngay sau khi có banner kết quả (thành công/ambiguous, `result` là dict trả về từ
+        run_pipeline) hoặc lỗi (`result=None`) — quyết định tab đích bên "Quản lý Phiếu trình"
+        + có tự mở trình duyệt hay không, rồi cho SendLogWindow đếm ngược tự đóng (kéo theo
+        đóng luôn PreviewWindow, xem _finish_post_send)."""
+        self._post_send_target_tab = (
+            "processing" if (result and result.get("submit_sign") == "1"
+                              and result.get("verified") and result.get("in_process"))
+            else "draft")
+        if result is not None:
+            import webbrowser
+            # KHÔNG có link tĩnh dẫn thẳng vào đúng phiếu trình (đã kiểm qua HAR thật: reportId
+            # chỉ xuất hiện trong AJAX ngầm kèm token dùng 1 lần, không hề có trên URL nhìn thấy
+            # được) — mở đúng MÀN HÌNH "Quản lý phiếu trình" trên web, tự tìm phiếu trong đó.
+            url = BASE + "/Index.do?request_locale=en_US&mainMenu=3&trId=2.2"
+            try:
+                webbrowser.open(url)
+                self._log_window.append("\n• Đã mở trình duyệt tới màn hình \"Quản lý phiếu trình\" trên web.")
+            except Exception as e:
+                self._log_window.append(f"\n• Không mở được trình duyệt: {e!r}")
+        else:
+            self._log_window.append("\n• Chưa hoàn tất — không tự mở trình duyệt.")
+        self._log_window.start_close_countdown(5)
+
+    def _finish_post_send(self):
+        """Gọi khi SendLogWindow đóng (tự đếm ngược hoặc bấm tay Đóng) — đóng luôn PreviewWindow
+        rồi nhảy sang đúng tab/sub-tab bên "Quản lý Phiếu trình" (xem _start_post_send_close)."""
+        target_tab = self._post_send_target_tab
+        self._on_close()
+        self.master._open_manage_reports_tab(target_tab)
 
     def _on_close(self):
         if self._sending:
@@ -4265,6 +4721,12 @@ class PreviewWindow(tk.Toplevel):
                     "Đang gửi phiếu trình — đóng cửa sổ này thì việc gửi vẫn tiếp tục chạy ngầm, "
                     "nhưng bạn sẽ không thấy kết quả nữa. Vẫn đóng?", parent=self):
                 return
+        if self._log_window is not None:
+            # Đóng PreviewWindow bằng đường khác (nút "Đóng" chính, hoặc bấm X) trong lúc
+            # SendLogWindow vẫn còn mở (giữa chừng gửi, hoặc đang đếm ngược) — đóng nốt luôn,
+            # tránh để cửa sổ nhật ký mồ côi không còn PreviewWindow phía sau.
+            try: self._log_window.destroy()
+            except Exception: pass
         if self._current_doc is not None:
             try: self._current_doc.close()
             except Exception: pass

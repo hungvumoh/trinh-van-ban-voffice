@@ -321,6 +321,24 @@ class TestMatchReport(unittest.TestCase):
                   "createdDate": "2026-07-31T15:25:40"}]
         self.assertIsNone(tvb._match_report(items, "thử nghiệm 1", 500013302, self.since))
 
+    def test_khop_theo_report_id_du_createdDate_cu_hon_since(self):
+        # Sửa phiếu trình cũ: createdDate là ngày TẠO GỐC (trước since_dt rất xa) — nếu còn dùng
+        # bộ lọc thời gian thì sẽ bị loại nhầm; có expect_report_id thì phải khớp thẳng theo ID,
+        # bỏ qua hẳn since_dt.
+        items = [{"reportId": 42, "content": "báo cáo tuần", "creatorId": 500013302,
+                  "createdDate": "2026-07-20T09:00:00"}]
+        item = tvb._match_report(items, "báo cáo tuần", 500013302, self.since, expect_report_id=42)
+        self.assertIsNotNone(item)
+        self.assertEqual(item["reportId"], 42)
+
+    def test_khong_khop_report_id_khac_du_noi_dung_va_thoi_gian_khop(self):
+        # Có expect_report_id thì content/creator/thời gian không còn ý nghĩa gì — id khác là
+        # không khớp, dù mọi thứ khác đều khớp.
+        items = [{"reportId": 99, "content": "thử nghiệm 1", "creatorId": 500013302,
+                  "createdDate": "2026-07-31T15:25:40"}]
+        self.assertIsNone(tvb._match_report(items, "thử nghiệm 1", 500013302, self.since,
+                                             expect_report_id=42))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
