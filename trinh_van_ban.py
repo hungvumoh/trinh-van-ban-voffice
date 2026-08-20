@@ -2712,6 +2712,7 @@ class App(tk.Tk):
         self.file_report = tk.StringVar()
         self.doc_sections = []
         self._edit_tmpdirs = []   # thư mục tạm chứa file tải về khi "Sửa" — dọn ở _reset_form()/thoát
+        self._readiness_after_id = None   # id lịch self.after() của _refresh_readiness — xem _cancel_readiness_loop
         atexit.register(self._cleanup_edit_tmpdirs)
         self.container = ttk.Frame(self); self.container.pack(fill="both", expand=True)
         self._show_login()
@@ -2727,10 +2728,24 @@ class App(tk.Tk):
         return f
 
     # ---------- MÀN 1: ĐĂNG NHẬP ----------
+    def _cancel_readiness_loop(self):
+        """Huỷ vòng self.after(700, self._refresh_readiness) đang chạy (nếu có) — bắt buộc phải
+        gọi trước khi rời màn hình chính (_show_login gọi ở đây), nếu không mỗi lần Đăng xuất
+        rồi Đăng nhập lại trong CÙNG 1 lần mở app sẽ cộng dồn thêm 1 vòng lặp 700ms chạy song
+        song vĩnh viễn (vòng cũ không tự dừng vì nó tự lịch lại chính nó trên `self`, mà `self`
+        — App/cửa sổ gốc — không bị huỷ khi đăng xuất, chỉ các widget con bên trong bị xoá)."""
+        if self._readiness_after_id is not None:
+            try:
+                self.after_cancel(self._readiness_after_id)
+            except tk.TclError:
+                pass
+            self._readiness_after_id = None
+
     def _show_login(self, auto=True):
         """`auto`: True (mặc định — lúc mở chương trình) — nếu đã "Nhớ đăng nhập" từ trước thì tự
         bấm ĐĂNG NHẬP luôn, không cần người dùng làm gì. `_do_logout` gọi auto=False để KHÔNG tự
         nhảy lại vào đúng tài khoản vừa đăng xuất — bắt buộc phải tự bấm lại."""
+        self._cancel_readiness_loop()
         self._clear()
         self.geometry("440x380")
         pad = ttk.Frame(self.container, padding=16); pad.pack(fill="both", expand=True)
@@ -3347,7 +3362,7 @@ class App(tk.Tk):
             self.readiness_label.config(text="⚠ Còn thiếu: " + ", ".join(missing), foreground="#c62828")
         else:
             self.readiness_label.config(text="✓ Sẵn sàng", foreground="#2e7d32")
-        self.after(700, self._refresh_readiness)
+        self._readiness_after_id = self.after(700, self._refresh_readiness)
 
     def _maybe_learn_flow_rule(self, flow_id, cfg):
         """Nếu luồng đang chọn KHÔNG do quy tắc nào tự suy ra được (từ khoá lạ, chưa có trong
