@@ -2653,6 +2653,10 @@ class SendLogWindow(tk.Toplevel):
 
     def __init__(self, master, title, on_close):
         super().__init__(master)
+        # transient (không phải grab_set — cửa sổ này vẫn tương tác được bình thường, không
+        # khoá gì) để Windows gom nó vào cùng nhóm với cửa sổ cha trên taskbar thay vì hiện
+        # thành 1 nút riêng biệt (macOS Dock vốn đã gom sẵn nên không thấy khác biệt).
+        self.transient(master)
         self.title(title)
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", lambda: None)
@@ -3987,6 +3991,9 @@ class ReportDetailWindow(tk.Toplevel):
 
     def __init__(self, master, item, which, session):
         super().__init__(master)
+        # transient (không grab_set) — chỉ để Windows gom vào cùng nhóm với cửa sổ cha trên
+        # taskbar thay vì hiện thành 1 nút riêng biệt, không đổi gì về tương tác.
+        self.transient(master)
         self.item = item
         self.which = which   # "processing" | "draft"
         self.session = session
@@ -4115,6 +4122,9 @@ class PreviewWindow(tk.Toplevel):
 
     def __init__(self, master, cfg, session):
         super().__init__(master)
+        # transient (không grab_set) — chỉ để Windows gom vào cùng nhóm với cửa sổ cha trên
+        # taskbar thay vì hiện thành 1 nút riêng biệt, không đổi gì về tương tác.
+        self.transient(master)
         self.cfg = cfg
         self.session = session
         self._stamps_cache = {}     # path -> [stamp dict]
