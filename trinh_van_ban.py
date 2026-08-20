@@ -2840,6 +2840,17 @@ class App(tk.Tk):
         self._logged_user = None
         self._show_login(auto=False)   # auto=False: không tự nhảy lại vào ngay tài khoản vừa thoát
 
+    def _open_voffice_web(self):
+        """Mở trình duyệt tới màn hình "Quản lý phiếu trình" trên chính hệ thống VOffice (không
+        phải tab "Quản lý Phiếu trình" của chương trình này) — cùng URL đã dùng ở
+        PreviewWindow._start_post_send_close sau khi Lưu/Trình xong."""
+        import webbrowser
+        url = BASE + "/Index.do?request_locale=en_US&mainMenu=3&trId=2.2"
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            messagebox.showerror("Không mở được trình duyệt", str(e))
+
     # ---------- Khung cuộn (dùng chung) ----------
     def _make_scrollable(self, parent):
         return make_scrollable_frame(parent)
@@ -3014,6 +3025,7 @@ class App(tk.Tk):
         ttk.Label(topbar, text=f"Đã đăng nhập: {getattr(self, '_logged_user', '')}",
                   foreground="#2e7d32", font=("", 9, "bold")).pack(side="left")
         ttk.Button(topbar, text="Đăng xuất", command=self._do_logout).pack(side="right")
+        ttk.Button(topbar, text="Mở VOffice", command=self._open_voffice_web).pack(side="right", padx=(0, 6))
 
         notebook = ttk.Notebook(self.container)
         notebook.pack(fill="both", expand=True)
@@ -3576,6 +3588,9 @@ class App(tk.Tk):
             self.mgmt_items[which] = {}   # iid -> item dict đầy đủ
         self._show_mgmt_tab(self.MGMT_TABS[0][0])
         self._reload_report_lists()   # tự làm mới 1 lần ngay khi mở màn hình chính (mỗi lần đăng nhập)
+
+        ttk.Label(parent, text=AUTHOR_MARK, font=("", 8), foreground="#999999").pack(
+            anchor="e", padx=12, pady=(0, 6))
 
     def _show_mgmt_tab(self, which):
         for w, page in self._mgmt_tab_frames.items():
