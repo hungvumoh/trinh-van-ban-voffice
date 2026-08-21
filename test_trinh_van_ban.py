@@ -24,6 +24,8 @@ PDF_PT_CUC_CU = "/Users/hnguyen/Library/CloudStorage/Dropbox/A Politician/2. LƯ
 PDF_PT_CUC_AC = "/Users/hnguyen/Library/CloudStorage/Dropbox/A Politician/1. SỰ VỤ/25.01.02. Hủy thuốc HIV AIDS/2.1. PHIẾU TRÌNH Lãnh đạo Cục - AC.pdf"
 PDF_PT_CUC_ZPV = "/Users/hnguyen/Library/CloudStorage/Dropbox/A Politician/1. SỰ VỤ/25.5.30. ZPV HPC/2.1. PHIẾU TRÌNH Lãnh đạo Cục.pdf"
 HAR_PREPARE_INSERT = "/Users/hnguyen/Downloads/000. Xem xoá/har 3 mở phiếu trình mới và chọn các luồng trình.har"
+PDF_WATERMARKED = ("/Users/hnguyen/Downloads/000. Xem xoá/Van ban di (1)/"
+                    "So_2.4._Phu_luc_X_-_Bieu_mau_-_17.06.26.pdf")
 
 def _skip_if_missing(path):
     return unittest.skipUnless(os.path.exists(path), f"thiếu file mẫu: {path}")
@@ -64,6 +66,52 @@ class TestExtractPhieuTrinhContent(unittest.TestCase):
         content = tvb.extract_phieu_trinh_content(PDF_PT_CUC_ZPV)
         self.assertIsNotNone(content)
         self.assertTrue(content.startswith("Kiểm tra, xác minh Lô sản phẩm vắc xin"))
+
+
+# ==================== strip_view_watermark (xoá watermark "đã xem/tải") ====================
+class TestStripViewWatermark(unittest.TestCase):
+    @_skip_if_missing(PDF_WATERMARKED)
+    def test_xoa_sach_watermark_giu_nguyen_noi_dung_that(self):
+        import fitz, shutil
+        tmp = tempfile.mktemp(suffix=".pdf")
+        shutil.copyfile(PDF_WATERMARKED, tmp)
+        try:
+            before = fitz.open(tmp)
+            n_pages = len(before)
+            text_before = [before[i].get_text() for i in range(n_pages)]
+            before.close()
+
+            removed = tvb.strip_view_watermark(tmp, "hungnv1.qld", lambda *a: None)
+            self.assertEqual(removed, n_pages)   # 1 watermark/trang
+
+            after = fitz.open(tmp)
+            self.assertEqual(len(after), n_pages)
+            for i in range(n_pages):
+                text_after = after[i].get_text()
+                self.assertNotIn("hungnv1.qld", text_after)
+                # nội dung thật (trừ đúng dòng watermark) phải giữ nguyên
+                only_wm_removed = "".join(
+                    ln for ln in text_before[i].splitlines(keepends=True)
+                    if "hungnv1.qld" not in ln)
+                self.assertEqual(only_wm_removed, text_after)
+            after.close()
+
+            # gọi lại lần 2 trên file ĐÃ SẠCH — không tìm thấy gì để xoá nữa (idempotent)
+            removed2 = tvb.strip_view_watermark(tmp, "hungnv1.qld", lambda *a: None)
+            self.assertEqual(removed2, 0)
+        finally:
+            os.remove(tmp)
+
+    @_skip_if_missing(PDF_WATERMARKED)
+    def test_khong_xoa_neu_sai_ten_dang_nhap(self):
+        import shutil
+        tmp = tempfile.mktemp(suffix=".pdf")
+        shutil.copyfile(PDF_WATERMARKED, tmp)
+        try:
+            removed = tvb.strip_view_watermark(tmp, "nguoi_khac.qld", lambda *a: None)
+            self.assertEqual(removed, 0)
+        finally:
+            os.remove(tmp)
 
 
 # ==================== flow_keyword_from_code (bỏ số, lấy hậu tố) ====================

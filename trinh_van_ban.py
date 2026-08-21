@@ -11,12 +11,14 @@ Cần: Python 3.9+, thư viện requests  ->  pip install requests
 Đặt 3 file cùng thư mục: trinh_van_ban.py, du_lieu.json, noi_nhan.json
 Chạy:  python trinh_van_ban.py
 """
-import atexit, base64, json, os, re, shutil, subprocess, sys, tempfile, textwrap, time, threading, unicodedata
+import atexit, base64, json, logging, os, re, shutil, subprocess, sys, tempfile, textwrap
+import threading, time, traceback, unicodedata
 from html import unescape as html_unescape   # tên "html" đã dùng làm biến cục bộ khắp file (nội dung
                                               # trang) — import tách riêng để khỏi đụng nhau
 from contextlib import contextmanager
 from functools import lru_cache
 from datetime import datetime, timedelta
+from logging.handlers import TimedRotatingFileHandler
 from urllib.parse import quote, unquote, urljoin
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -70,6 +72,44 @@ if getattr(sys, "frozen", False):
         HERE = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 else:
     HERE = os.path.dirname(os.path.abspath(__file__))
+
+# ---------- Ghi log ra file (phục vụ tra lỗi khi dùng lâu dài, không ai ngồi cạnh theo dõi) ----
+# CHỈ ghi CỤC BỘ trên máy — không tự gửi đi đâu cả (app xử lý nội dung phiếu trình có thể nhạy
+# cảm, không phù hợp kiểu "tự động gửi báo lỗi về server hãng" như app thương mại hay làm). Khi
+# có sự cố, tự tìm đúng file app_log.txt (cùng thư mục settings.json/nguoi_dung.json) gửi lại để
+# tra — xem HUONG_DAN.md. Giữ tối đa 14 ngày gần nhất (TimedRotatingFileHandler tự xoay/xoá file
+# cũ), không phình vô hạn theo thời gian dùng.
+LOG_FILE = os.path.join(HERE, "app_log.txt")
+APP_VERSION = "2026-08-21"
+
+def _setup_file_logger():
+    logger = logging.getLogger("trinh_van_ban")
+    logger.setLevel(logging.DEBUG)
+    handler = TimedRotatingFileHandler(LOG_FILE, when="midnight", backupCount=14,
+                                        encoding="utf-8", delay=True)
+    handler.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-7s  %(message)s"))
+    logger.addHandler(handler)
+    return logger
+
+_file_logger = _setup_file_logger()
+_file_logger.info(f"=== Khởi động chương trình — bản {APP_VERSION} ===")
+
+def _log_uncaught_exception(exc_type, exc_value, exc_tb):
+    """Lưới hứng cuối cho lỗi KHÔNG lường trước ở luồng chính (ngoài mọi try/except đã có sẵn
+    trong code) — ghi đầy đủ traceback vào app_log.txt trước khi hành vi mặc định (in ra
+    stderr, thường không ai thấy vì app đóng gói không có cửa sổ console) tiếp tục chạy."""
+    _file_logger.error("LỖI KHÔNG BẮT ĐƯỢC (luồng chính):\n"
+                        + "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+sys.excepthook = _log_uncaught_exception
+
+def _log_thread_exception(args):
+    """Tương tự _log_uncaught_exception nhưng cho lỗi lọt ra ngoài 1 threading.Thread nền (mỗi
+    worker trong code đã tự try/except riêng rồi, đây chỉ là lưới hứng cuối phòng khi sót)."""
+    _file_logger.error(f"LỖI KHÔNG BẮT ĐƯỢC (luồng nền '{args.thread.name}'):\n"
+                        + "".join(traceback.format_exception(args.exc_type, args.exc_value,
+                                                               args.exc_traceback)))
+threading.excepthook = _log_thread_exception
 
 # Header kiểu trình duyệt (điều hướng, KHÔNG phải XHR) — dùng cho login & upload
 BROWSER_HEADERS = {
@@ -1974,6 +2014,57 @@ def find_signature_stamps(doc, flow_items, log):
             log(f"   • Trang {pno+1}: '{anchor['text']}' → số {number} (x={x_mid:.0f}, y={y_mid:.0f})")
     return stamps
 
+# Watermark "đã xem/tải" hệ thống VOffice tự chèn MỖI LẦN 1 file được xem/tải qua web (kể cả
+# lúc chương trình này tự tải file cũ về lúc "Sửa") — dạng chữ chéo "<tên đăng nhập>_<Họ
+# tên>_<ngày/tháng/năm giờ:phút:giây>" in ở mọi trang. Không xoá thì file tải về lúc Sửa đã dính
+# sẵn watermark, Trình lại xong xem/tải lần nữa sẽ bị chồng thêm 1 lớp mới nữa. Đã tự mở 1 file
+# PDF thật (dry-run) để xác nhận: watermark là 1 khối lệnh vẽ chữ TÁCH BIỆT khỏi nội dung thật
+# trong content stream của trang (không phải annotation, không phải lớp ẩn/OCG) — nên chỉ cần
+# làm rỗng ĐÚNG câu lệnh vẽ ra đúng chuỗi chữ đó (khớp theo khuôn, neo theo tên đăng nhập đang
+# dùng — không hardcode tên/tài khoản cụ thể nào, nên áp dụng được cho mọi tài khoản), không đụng
+# tới bất kỳ lệnh vẽ nào khác — an toàn hơn nhiều so với xoá theo vùng hình chữ nhật (dễ ăn lẹm
+# chữ thật nằm gần watermark do watermark bị xoay chéo).
+_WATERMARK_TJ_RE = re.compile(rb'\(([^()\\]*)\)Tj')
+
+def _watermark_pattern(username):
+    return re.compile(re.escape(username).encode() + rb'_.+_\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}')
+
+def strip_view_watermark(path, username, log=lambda *a: None):
+    """Xoá watermark "đã xem/tải" (nếu có) khỏi file PDF `path`, GHI ĐÈ ngay tại chỗ — chỉ nên
+    gọi trên bản tải tạm về máy (vd lúc "Sửa"), không gọi trên file người dùng tự chọn. Trả về
+    số watermark đã xoá; 0 nếu không tìm thấy (file có thể chưa dính watermark, hoặc không phải
+    PDF, hoặc khuôn watermark khác đi — im lặng bỏ qua, không coi là lỗi)."""
+    if fitz is None or not username or not path.lower().endswith(".pdf"):
+        return 0
+    pat = _watermark_pattern(username)
+    try:
+        doc = fitz.open(path)
+    except Exception:
+        return 0
+    try:
+        removed = 0
+        for page in doc:
+            for xref in page.get_contents():
+                raw = doc.xref_stream(xref)
+                def repl(m):
+                    nonlocal removed
+                    if pat.match(m.group(1)):
+                        removed += 1
+                        return b"()Tj"
+                    return m.group(0)
+                new_raw = _WATERMARK_TJ_RE.sub(repl, raw)
+                if new_raw != raw:
+                    doc.update_stream(xref, new_raw)
+        if not removed:
+            return 0
+        out_path = path + ".nowm.tmp"
+        doc.save(out_path, garbage=0, deflate=False)
+    finally:
+        doc.close()
+    os.replace(out_path, path)
+    log(f"   • Đã xoá {removed} watermark 'đã xem/tải' của hệ thống trên file vừa tải về.")
+    return removed
+
 def _sig_tagged_path(path):
     """Đường dẫn cho bản PDF đã đánh số — 1 thư mục tạm riêng (xem _new_gen_tmpdir), giữ
     NGUYÊN TÊN gốc bên trong (không ghi đè file gốc, không thêm ngày/hậu tố)."""
@@ -2721,6 +2812,15 @@ class App(tk.Tk):
         self.container = ttk.Frame(self); self.container.pack(fill="both", expand=True)
         self._show_login()
 
+    def report_callback_exception(self, exc_type, exc_value, exc_tb):
+        """Tkinter tự gọi hàm này cho MỌI lỗi xảy ra trong callback GUI (bấm nút, gõ phím...) —
+        mặc định chỉ in ra stderr rồi thôi (không ai thấy ở bản đóng gói không có cửa sổ
+        console). Đây là nguồn lỗi không lường trước phổ biến nhất trong 1 app tkinter, nên ghi
+        vào app_log.txt trước khi vẫn giữ hành vi mặc định (in stderr) để debug tại chỗ khi cần."""
+        _file_logger.error("LỖI TRONG GIAO DIỆN (callback):\n"
+                            + "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+        super().report_callback_exception(exc_type, exc_value, exc_tb)
+
     def _clear(self):
         for w in self.container.winfo_children():
             w.destroy()
@@ -3324,6 +3424,7 @@ class App(tk.Tk):
 
     def log(self, msg):
         self.logbox.insert("end", msg + "\n"); self.logbox.see("end"); self.update_idletasks()
+        _file_logger.info(msg)
 
     def _collect_cfg(self):
         return {
@@ -3792,6 +3893,7 @@ class App(tk.Tk):
                 dest = os.path.join(sub, title)
                 try:
                     download_attach(s, url, dest, self.log)
+                    strip_view_watermark(dest, self._logged_user, self.log)
                     if i == 0:
                         result["report_local"] = dest
                     else:
@@ -3852,6 +3954,7 @@ class App(tk.Tk):
                         url = f"{BASE}/uploadiframe!openFile.do?token={info['token']}&attachId={f['draftDocumentId']}"
                         try:
                             download_attach(s, url, dest, self.log)
+                            strip_view_watermark(dest, self._logged_user, self.log)
                             if f is main_file:
                                 doc["local_file"] = dest
                             else:

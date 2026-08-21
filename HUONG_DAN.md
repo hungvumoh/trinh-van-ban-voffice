@@ -94,3 +94,10 @@ tuỳ nút đã bấm.
   Dữ liệu ghim/tần suất + quy tắc tự nhận luồng theo ký hiệu văn bản lưu trong `luong_trinh.json`
   (sổ RIÊNG của máy đang chạy — máy khác cài chương trình này sẽ có sổ trống, tự học lại từ đầu).
 - Muốn thêm nơi nhận chưa có trong sổ: mở `noi_nhan.json`, thêm dòng `"Tên đơn vị": "ID"`.
+
+## Khi gặp lỗi / muốn góp ý cải tiến
+Chương trình tự ghi log ra file **`app_log.txt`** (cùng thư mục với `settings.json`/`nguoi_dung.json`) —
+kể cả lỗi không lường trước được (crash) cũng được ghi lại đầy đủ vào đây. File này CHỈ nằm trên máy
+bạn, chương trình không tự gửi đi đâu cả. Khi gặp lỗi/muốn báo để cải tiến, gửi lại file này (hoặc
+đoạn cuối gần thời điểm xảy ra lỗi) — có sẵn dòng "=== Khởi động chương trình — bản ... ===" ở đầu mỗi
+lần mở app để biết chính xác đang chạy bản nào. Giữ tối đa 14 ngày gần nhất, tự xoá bớt file cũ hơn.
