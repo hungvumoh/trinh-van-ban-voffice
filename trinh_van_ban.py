@@ -1154,6 +1154,17 @@ def download_attach(s, url_or_path, dest_path, log=lambda *a: None):
     log(f"   → Đã tải file cũ về: {dest_path}")
     return dest_path
 
+def open_file_with_default_app(path):
+    """Mở 1 file bằng ứng dụng mặc định của hệ điều hành (PDF reader, Word...) — dùng cho nút
+    "Mở" ở khung Chi tiết phiếu trình (xem ReportDetailWindow._open_attach). Ném lỗi ra ngoài
+    nếu không mở được, để nơi gọi tự quyết định báo cho người dùng ra sao."""
+    if sys.platform == "win32":
+        os.startfile(path)   # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+
 def remove_attach_file(s, attach_id, log=lambda *a: None):
     """Xoá 1 file đính kèm CŨ khỏi hệ thống (`uploadiframe!removeFile.do`) — BẮT BUỘC khi Sửa 1
     văn bản/phiếu trình đã có file và upload lại: xác nhận qua 2 HAR thật ('thay file.har',
@@ -4138,8 +4149,10 @@ class ReportDetailWindow(tk.Toplevel):
         self._build_info(body, item)
         self._build_list_section(body, "Tiến trình ký", "process_list", height=6)
         self._build_list_section(body, "Lịch sử", "history_list", height=6)
-        self._build_list_section(body, "File đính kèm", "attach_list", height=4)
+        self._build_attach_section(body)
 
+        self._attach_items = []   # song song với self.attach_list, cùng chỉ số — xem _apply_detail
+        self._attach_tokens = {}  # draftDocumentId -> {"name","token"} — xem _fetch_attach_tokens
         self._load_detail()
 
     def _row(self, parent, label, value):
@@ -4163,6 +4176,22 @@ class ReportDetailWindow(tk.Toplevel):
         lb.pack(fill="both", expand=True)
         setattr(self, attr_name, lb)
 
+    def _build_attach_section(self, parent):
+        """Giống _build_list_section nhưng thêm bấm-đúp để XEM nhanh (giữ nguyên watermark —
+        đây là hành động xem thật, giống mở trên web) + 2 nút TẢI VỀ (xoá watermark trước khi
+        lưu — xem _download_selected_attach/_download_all_attachs) — trước đây chỉ liệt kê tên
+        file, không có cách nào mở/tải ra được."""
+        box = ttk.LabelFrame(parent, text="File đính kèm (Click đúp để xem)", padding=6)
+        box.pack(fill="both", expand=True, pady=(0, 6))
+        self.attach_list = tk.Listbox(box, height=4)
+        self.attach_list.pack(fill="both", expand=True)
+        self.attach_list.bind("<Double-1>", lambda e: self._open_attach())
+        btnrow = ttk.Frame(box); btnrow.pack(fill="x", pady=(4, 0))
+        ttk.Button(btnrow, text="Tải toàn bộ các file",
+                   command=self._download_all_attachs).pack(side="left")
+        ttk.Button(btnrow, text="Tải file này",
+                   command=self._download_selected_attach).pack(side="left", padx=(6, 0))
+
     def _load_detail(self):
         s, rid = self.session, self.report_id
         def worker():
@@ -4184,10 +4213,144 @@ class ReportDetailWindow(tk.Toplevel):
             when = (it.get("createAt") or "").replace("T", " ")
             self.history_list.insert("end", f"{when} — {it.get('fullname')}: {it.get('note')}")
         self.attach_list.delete(0, "end")
+        self._attach_items = []
         for it in attachs:
             name = it.get("draftDocumentName")
             if name:
                 self.attach_list.insert("end", name)
+                self._attach_items.append(it)
+        self._fetch_attach_tokens()
+
+    def _fetch_attach_tokens(self):
+        """Lấy sẵn token tải cho MỌI file đang liệt kê (nhóm theo publishDocumentId để đỡ gọi
+        trùng nếu 1 văn bản có nhiều file) — lấy trước ngay khi mở khung, để bấm "Mở"/"Tải về"
+        không phải đợi thêm 1 lượt gọi mạng nữa."""
+        pids = {it.get("documentId") for it in self._attach_items if it.get("documentId")}
+        if not pids:
+            return
+        s = self.session
+        def worker():
+            tokens = {}
+            for pid in pids:
+                tokens.update(fetch_draft_attach_tokens(s, pid))
+            self.after(0, lambda: self._attach_tokens.update(tokens))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _selected_attach(self):
+        sel = self.attach_list.curselection()
+        if not sel:
+            messagebox.showinfo("Chưa chọn file", "Chọn 1 file trong danh sách trước.", parent=self)
+            return None
+        return self._attach_items[sel[0]]
+
+    def _attach_url(self, it):
+        aid = it.get("draftDocumentId")
+        info = self._attach_tokens.get(aid)
+        if not info:
+            return None
+        return f"{BASE}/uploadiframe!openFile.do?token={info['token']}&attachId={aid}"
+
+    def _open_attach(self):
+        """Bấm đúp — xem nhanh bằng ứng dụng mặc định của máy, GIỮ NGUYÊN watermark (đây là
+        hành động xem thật, hệ thống tự đóng dấu y như khi bạn xem trên web — không xoá gì)."""
+        it = self._selected_attach()
+        if it is None:
+            return
+        url = self._attach_url(it)
+        if not url:
+            messagebox.showwarning("Chưa sẵn sàng",
+                                    "Đang lấy đường dẫn tải file, thử lại sau vài giây.", parent=self)
+            return
+        name = it.get("draftDocumentName") or "file"
+        dest = os.path.join(_new_gen_tmpdir("voffice_view_"), name)
+        dlg = _ConvertingDialog(self, f"Đang tải để xem: {name}…")
+        s = self.session
+        def worker():
+            try:
+                download_attach(s, url, dest)
+            except Exception as e:
+                self.after(0, lambda: (dlg.close(),
+                                        messagebox.showerror("Không tải được file", str(e), parent=self)))
+                return
+            def do_open():
+                dlg.close()
+                try:
+                    open_file_with_default_app(dest)
+                except Exception as e:
+                    messagebox.showerror("Không mở được file", str(e), parent=self)
+            self.after(0, do_open)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_selected_attach(self):
+        """Nút "Tải file này" — khác _open_attach ở chỗ LƯU VĨNH VIỄN theo đường dẫn tự chọn,
+        và XOÁ WATERMARK trước khi lưu (đây là tải về để dùng thật, không phải xem thoáng qua —
+        xem strip_view_watermark)."""
+        it = self._selected_attach()
+        if it is None:
+            return
+        url = self._attach_url(it)
+        if not url:
+            messagebox.showwarning("Chưa sẵn sàng",
+                                    "Đang lấy đường dẫn tải file, thử lại sau vài giây.", parent=self)
+            return
+        name = it.get("draftDocumentName") or "file"
+        dest = filedialog.asksaveasfilename(parent=self, initialfile=name,
+                                             defaultextension=os.path.splitext(name)[1])
+        if not dest:
+            return
+        dlg = _ConvertingDialog(self, f"Đang tải: {name}…")
+        s, username = self.session, getattr(self.master, "_logged_user", None)
+        def worker():
+            try:
+                download_attach(s, url, dest)
+                strip_view_watermark(dest, username)
+            except Exception as e:
+                self.after(0, lambda: (dlg.close(),
+                                        messagebox.showerror("Không tải được file", str(e), parent=self)))
+                return
+            self.after(0, lambda: (dlg.close(), messagebox.showinfo(
+                "Đã tải về", f"Đã lưu bản sạch (không watermark) tại:\n{dest}", parent=self)))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_all_attachs(self):
+        """Nút "Tải toàn bộ các file" — tải hết danh sách vào 1 thư mục tự chọn, mỗi file cũng
+        được xoá watermark trước khi lưu như _download_selected_attach. Lỗi từng file (nếu có)
+        không dừng cả loạt — báo gộp lại cuối cùng (best-effort, giống triết lý các chỗ tải
+        hàng loạt khác trong chương trình)."""
+        if not self._attach_items:
+            messagebox.showinfo("Không có file", "Phiếu trình này chưa có file đính kèm nào.", parent=self)
+            return
+        folder = filedialog.askdirectory(parent=self, title="Chọn thư mục lưu toàn bộ file")
+        if not folder:
+            return
+        items = list(self._attach_items)
+        n = len(items)
+        dlg = _ConvertingDialog(self, f"Đang tải file (0/{n})…")
+        s, username = self.session, getattr(self.master, "_logged_user", None)
+        def worker():
+            ok, failed = [], []
+            for i, it in enumerate(items, start=1):
+                name = it.get("draftDocumentName") or f"file_{i}"
+                self.after(0, lambda i=i, name=name: dlg.set_status(f"Đang tải file ({i}/{n}): {name}…"))
+                url = self._attach_url(it)
+                if not url:
+                    failed.append(f"{name} (chưa lấy được đường dẫn tải)")
+                    continue
+                dest = os.path.join(folder, name)
+                try:
+                    download_attach(s, url, dest)
+                    strip_view_watermark(dest, username)
+                    ok.append(name)
+                except Exception as e:
+                    failed.append(f"{name} ({e})")
+            def done():
+                dlg.close()
+                msg = f"Đã tải {len(ok)}/{n} file (bản sạch, không watermark) vào:\n{folder}"
+                if failed:
+                    msg += "\n\nKhông tải được:\n" + "\n".join(failed)
+                messagebox.showinfo("Tải toàn bộ file", msg, parent=self)
+            self.after(0, done)
+        threading.Thread(target=worker, daemon=True).start()
 
     def _confirm_cancel(self):
         if not messagebox.askyesno(
