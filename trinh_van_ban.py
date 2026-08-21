@@ -4129,7 +4129,12 @@ class ReportDetailWindow(tk.Toplevel):
         self.report_id = item.get("reportId")
 
         self.title(f"Chi tiết phiếu trình #{self.report_id}")
-        self.geometry("640x620")
+        # Tự tính theo ĐÚNG màn hình đang chạy (giống _show_main) thay vì số cứng — phiếu nào
+        # nhiều bước ký/lịch sử dài trước đây dễ bị đẩy tụt phần File đính kèm ra ngoài khung
+        # nhìn thấy được, phải tự kéo to cửa sổ mới thấy (xem phản hồi người dùng kèm ảnh chụp).
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(int(sw * 0.55), 760), min(int(sh * 0.8), 860)
+        self.geometry(f"{w}x{h}")
         self.minsize(480, 400)
 
         top = ttk.Frame(self, padding=(10, 8)); top.pack(fill="x")
@@ -4139,17 +4144,22 @@ class ReportDetailWindow(tk.Toplevel):
         if which == "draft":
             ttk.Button(top, text="Sửa", command=self._edit_in_compose).pack(side="left")
         ttk.Button(top, text="Đóng", command=self.destroy).pack(side="left", padx=6)
+        ttk.Button(top, text="Tải toàn bộ tài liệu",
+                   command=self._download_all_attachs).pack(side="left", padx=(6, 0))
 
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(self, textvariable=self.status_var, padding=(10, 4),
                                        wraplength=600, justify="left")
         self.status_label.pack(fill="x")
 
+        # Thứ tự chung cho các cấu phần thuộc Quản lý Phiếu trình: Thông tin → File đính kèm →
+        # Tiến trình → Lịch sử (ưu tiên cái cần xem/thao tác trước, "Lịch sử" ít cần nhất xếp
+        # cuối cùng).
         body = ttk.Frame(self, padding=8); body.pack(fill="both", expand=True)
         self._build_info(body, item)
+        self._build_attach_section(body)
         self._build_list_section(body, "Tiến trình ký", "process_list", height=6)
         self._build_list_section(body, "Lịch sử", "history_list", height=6)
-        self._build_attach_section(body)
 
         self._attach_items = []   # song song với self.attach_list, cùng chỉ số — xem _apply_detail
         self._attach_tokens = {}  # draftDocumentId -> {"name","token"} — xem _fetch_attach_tokens
@@ -4172,25 +4182,34 @@ class ReportDetailWindow(tk.Toplevel):
     def _build_list_section(self, parent, title, attr_name, height):
         box = ttk.LabelFrame(parent, text=title, padding=6)
         box.pack(fill="both", expand=True, pady=(0, 6))
-        lb = tk.Listbox(box, height=height)
-        lb.pack(fill="both", expand=True)
+        # Thanh cuộn riêng cho khung này — lưới an toàn cho phiếu trình có quá nhiều bước ký/
+        # dòng lịch sử để vừa trần % màn hình: dù cửa sổ có to cỡ nào, khung này tự cuộn thay vì
+        # đẩy các khung/nút phía dưới ra khỏi tầm nhìn.
+        wrap = ttk.Frame(box); wrap.pack(fill="both", expand=True)
+        lb = tk.Listbox(wrap, height=height)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=lb.yview)
+        lb.configure(yscrollcommand=vsb.set)
+        lb.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
         setattr(self, attr_name, lb)
 
     def _build_attach_section(self, parent):
         """Giống _build_list_section nhưng thêm bấm-đúp để XEM nhanh (giữ nguyên watermark —
-        đây là hành động xem thật, giống mở trên web) + 2 nút TẢI VỀ (xoá watermark trước khi
-        lưu — xem _download_selected_attach/_download_all_attachs) — trước đây chỉ liệt kê tên
-        file, không có cách nào mở/tải ra được."""
+        đây là hành động xem thật, giống mở trên web) + nút TẢI file đang chọn (xoá watermark
+        trước khi lưu — xem _download_selected_attach). Nút "Tải toàn bộ tài liệu" nằm ở thanh
+        trên cùng (xem __init__), không lặp lại ở đây."""
         box = ttk.LabelFrame(parent, text="File đính kèm (Click đúp để xem)", padding=6)
         box.pack(fill="both", expand=True, pady=(0, 6))
-        self.attach_list = tk.Listbox(box, height=4)
-        self.attach_list.pack(fill="both", expand=True)
+        wrap = ttk.Frame(box); wrap.pack(fill="both", expand=True)
+        self.attach_list = tk.Listbox(wrap, height=4)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.attach_list.yview)
+        self.attach_list.configure(yscrollcommand=vsb.set)
+        self.attach_list.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
         self.attach_list.bind("<Double-1>", lambda e: self._open_attach())
         btnrow = ttk.Frame(box); btnrow.pack(fill="x", pady=(4, 0))
-        ttk.Button(btnrow, text="Tải toàn bộ các file",
-                   command=self._download_all_attachs).pack(side="left")
         ttk.Button(btnrow, text="Tải file này",
-                   command=self._download_selected_attach).pack(side="left", padx=(6, 0))
+                   command=self._download_selected_attach).pack(side="left")
 
     def _load_detail(self):
         s, rid = self.session, self.report_id
