@@ -2342,7 +2342,7 @@ class FileList(ttk.Frame):
         top = ttk.Frame(self); top.pack(fill="x")
         ttk.Label(top, text=label, width=22).pack(side="left")
         ttk.Button(top, text="Thêm file…", command=self._add).pack(side="left")
-        ttk.Button(top, text="Bỏ chọn", command=self._remove).pack(side="left", padx=4)
+        ttk.Button(top, text="Xoá file", command=self._remove).pack(side="left", padx=4)
         self.lb = tk.Listbox(self, height=self.MIN_HEIGHT)
         self.lb.pack(fill="x", padx=(0, 0))
 
@@ -3644,7 +3644,7 @@ class App(tk.Tk):
     MGMT_COLUMNS = (
         ("date", "Ngày tạo", 120),
         ("content", "Nội dung", 370),
-        ("holder", "Người đang giữ", 140),
+        ("holder", "Người ký", 140),
         ("finish", "Ngày hoàn thành", 120),
     )
 
