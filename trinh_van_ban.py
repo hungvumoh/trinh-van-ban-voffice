@@ -1165,6 +1165,13 @@ def open_file_with_default_app(path):
     else:
         subprocess.Popen(["xdg-open", path])
 
+def parse_report_attach_icons(attach_path_icons):
+    """Tách [(href, title), ...] từ attachPathIcons của 1 phiếu trình — chuỗi HTML nhúng sẵn
+    link tải file CỦA CHÍNH PHIẾU TRÌNH (không phải văn bản, không cần token/API riêng): item
+    đầu tiên là file chính, còn lại là tài liệu thêm. Dùng chung cho lúc "Sửa"
+    (App._edit_in_compose) và lúc xem trong Quản lý Phiếu trình (ReportDetailWindow)."""
+    return re.findall(r"href='([^']+)'[^>]*>\s*<img[^>]*title='([^']*)'", attach_path_icons or "")
+
 def remove_attach_file(s, attach_id, log=lambda *a: None):
     """Xoá 1 file đính kèm CŨ khỏi hệ thống (`uploadiframe!removeFile.do`) — BẮT BUỘC khi Sửa 1
     văn bản/phiếu trình đã có file và upload lại: xác nhận qua 2 HAR thật ('thay file.har',
@@ -3884,8 +3891,7 @@ class App(tk.Tk):
             result = {"report_local": None, "extra_locals": [], "docs": [], "report_existing_attach_ids": []}
             # 1. File của chính Phiếu trình (+ tài liệu thêm) — link kèm token đã có sẵn
             #    trong attachPathIcons của item (không cần API mới).
-            hrefs = re.findall(r"href='([^']+)'[^>]*>\s*<img[^>]*title='([^']*)'",
-                                item.get("attachPathIcons") or "")
+            hrefs = parse_report_attach_icons(item.get("attachPathIcons"))
             n_report_files = len(hrefs)
             for i, (href, title) in enumerate(hrefs):
                 self.after(0, lambda i=i, title=title: dlg.set_status(
@@ -4146,23 +4152,50 @@ class ReportDetailWindow(tk.Toplevel):
         ttk.Button(top, text="Đóng", command=self.destroy).pack(side="left", padx=6)
         ttk.Button(top, text="Tải toàn bộ tài liệu",
                    command=self._download_all_attachs).pack(side="left", padx=(6, 0))
+        # 1 nút DUY NHẤT cho cả 2 khung file (phiếu trình + văn bản) — chọn file ở bên nào cũng
+        # bấm nút này để tải bản sạch (xoá watermark), không cần 2 nút riêng lặp lại như trước.
+        ttk.Button(top, text="Tải file đang chọn",
+                   command=self._download_selected_attach).pack(side="left", padx=(6, 0))
 
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(self, textvariable=self.status_var, padding=(10, 4),
                                        wraplength=600, justify="left")
         self.status_label.pack(fill="x")
 
-        # Thứ tự chung cho các cấu phần thuộc Quản lý Phiếu trình: Thông tin → File đính kèm →
-        # Tiến trình → Lịch sử (ưu tiên cái cần xem/thao tác trước, "Lịch sử" ít cần nhất xếp
-        # cuối cùng).
+        # Thứ tự chung cho các cấu phần thuộc Quản lý Phiếu trình: Thông tin → File phiếu trình
+        # → File đính kèm (văn bản) → Tiến trình → Lịch sử (ưu tiên cái cần xem/thao tác trước,
+        # "Lịch sử" ít cần nhất xếp cuối cùng). "File phiếu trình" và "File đính kèm" tách 2
+        # khung riêng, cùng cách gọi tên đã quen ở Soạn văn bản ("Nhóm PHIẾU TRÌNH (không gửi
+        # đi)" / "Nhóm VĂN BẢN (gửi đi)") — trước đây chỉ thấy file văn bản, không thấy được
+        # file của chính phiếu trình (xem phản hồi người dùng).
         body = ttk.Frame(self, padding=8); body.pack(fill="both", expand=True)
         self._build_info(body, item)
-        self._build_attach_section(body)
+        self._build_attach_section(body, "File phiếu trình (không gửi đi) (Click đúp để xem)",
+                                    "_report_attach_items", "report_attach_list")
+        self._build_attach_section(body, "File đính kèm — văn bản (gửi đi) (Click đúp để xem)",
+                                    "_doc_attach_items", "doc_attach_list")
         self._build_list_section(body, "Tiến trình ký", "process_list", height=6)
         self._build_list_section(body, "Lịch sử", "history_list", height=6)
 
-        self._attach_items = []   # song song với self.attach_list, cùng chỉ số — xem _apply_detail
+        # Chỉ cho chọn được 1 file tại 1 thời điểm GIỮA CẢ 2 khung (chọn bên này thì tự bỏ chọn
+        # bên kia) — để nút "Tải file này" (duy nhất, dùng chung) luôn biết chính xác đang chọn
+        # file nào, không mập mờ nếu lỡ còn chọn dở ở khung kia từ trước.
+        self.report_attach_list.bind("<<ListboxSelect>>", lambda e: (
+            self.doc_attach_list.selection_clear(0, "end") if self.report_attach_list.curselection() else None))
+        self.doc_attach_list.bind("<<ListboxSelect>>", lambda e: (
+            self.report_attach_list.selection_clear(0, "end") if self.doc_attach_list.curselection() else None))
+
         self._attach_tokens = {}  # draftDocumentId -> {"name","token"} — xem _fetch_attach_tokens
+        # File của chính phiếu trình đã có sẵn NGAY trong `item` (attachPathIcons) — không cần
+        # đợi tải gì thêm, hiện được luôn, khác file văn bản (self._doc_attach_items) phải chờ
+        # _load_detail() gọi mạng xong mới có.
+        self._report_attach_items = [{"name": title, "url": BASE + "/" + html_unescape(href)}
+                                      for href, title in parse_report_attach_icons(
+                                          item.get("attachPathIcons"))]
+        for it in self._report_attach_items:
+            self.report_attach_list.insert("end", it["name"])
+        self._resize_attach_list(self.report_attach_list, len(self._report_attach_items))
+
         self._load_detail()
 
     def _row(self, parent, label, value):
@@ -4193,23 +4226,33 @@ class ReportDetailWindow(tk.Toplevel):
         vsb.pack(side="right", fill="y")
         setattr(self, attr_name, lb)
 
-    def _build_attach_section(self, parent):
+    ATTACH_LIST_MIN_HEIGHT = 2   # cùng quy ước với FileList bên Soạn văn bản
+    ATTACH_LIST_MAX_HEIGHT = 12
+
+    def _resize_attach_list(self, lb, count):
+        """Tự giãn chiều cao khung file theo đúng số file đang có (tối thiểu
+        ATTACH_LIST_MIN_HEIGHT, tối đa ATTACH_LIST_MAX_HEIGHT dòng) — trước đây cố định 4 dòng,
+        phiếu trình nào nhiều tài liệu thêm bị cắt bớt không thấy hết (xem phản hồi người dùng)."""
+        lb.config(height=max(self.ATTACH_LIST_MIN_HEIGHT, min(count, self.ATTACH_LIST_MAX_HEIGHT)))
+
+    def _build_attach_section(self, parent, title, items_attr, listbox_attr):
         """Giống _build_list_section nhưng thêm bấm-đúp để XEM nhanh (giữ nguyên watermark —
-        đây là hành động xem thật, giống mở trên web) + nút TẢI file đang chọn (xoá watermark
-        trước khi lưu — xem _download_selected_attach). Nút "Tải toàn bộ tài liệu" nằm ở thanh
-        trên cùng (xem __init__), không lặp lại ở đây."""
-        box = ttk.LabelFrame(parent, text="File đính kèm (Click đúp để xem)", padding=6)
+        đây là hành động xem thật, giống mở trên web). Dùng chung cho cả 2 khung "File phiếu
+        trình" và "File đính kèm — văn bản" (`items_attr`/`listbox_attr` phân biệt khung nào).
+        Nút tải (cả "Tải toàn bộ tài liệu" lẫn "Tải file này") nằm chung ở thanh trên cùng (xem
+        __init__) — chỉ 1 nút "Tải file này" DÙNG CHUNG cho cả 2 khung, không lặp lại mỗi khung
+        1 nút riêng như trước."""
+        box = ttk.LabelFrame(parent, text=title, padding=6)
         box.pack(fill="both", expand=True, pady=(0, 6))
         wrap = ttk.Frame(box); wrap.pack(fill="both", expand=True)
-        self.attach_list = tk.Listbox(wrap, height=4)
-        vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.attach_list.yview)
-        self.attach_list.configure(yscrollcommand=vsb.set)
-        self.attach_list.pack(side="left", fill="both", expand=True)
+        lb = tk.Listbox(wrap, height=self.ATTACH_LIST_MIN_HEIGHT)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=lb.yview)
+        lb.configure(yscrollcommand=vsb.set)
+        lb.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-        self.attach_list.bind("<Double-1>", lambda e: self._open_attach())
-        btnrow = ttk.Frame(box); btnrow.pack(fill="x", pady=(4, 0))
-        ttk.Button(btnrow, text="Tải file này",
-                   command=self._download_selected_attach).pack(side="left")
+        lb.bind("<Double-1>", lambda e: self._open_attach(items_attr, listbox_attr))
+        setattr(self, listbox_attr, lb)
+        setattr(self, items_attr, [])
 
     def _load_detail(self):
         s, rid = self.session, self.report_id
@@ -4231,20 +4274,22 @@ class ReportDetailWindow(tk.Toplevel):
         for it in history:
             when = (it.get("createAt") or "").replace("T", " ")
             self.history_list.insert("end", f"{when} — {it.get('fullname')}: {it.get('note')}")
-        self.attach_list.delete(0, "end")
-        self._attach_items = []
+        self.doc_attach_list.delete(0, "end")
+        self._doc_attach_items = []
         for it in attachs:
             name = it.get("draftDocumentName")
             if name:
-                self.attach_list.insert("end", name)
-                self._attach_items.append(it)
+                self.doc_attach_list.insert("end", name)
+                self._doc_attach_items.append(it)
+        self._resize_attach_list(self.doc_attach_list, len(self._doc_attach_items))
         self._fetch_attach_tokens()
 
     def _fetch_attach_tokens(self):
-        """Lấy sẵn token tải cho MỌI file đang liệt kê (nhóm theo publishDocumentId để đỡ gọi
-        trùng nếu 1 văn bản có nhiều file) — lấy trước ngay khi mở khung, để bấm "Mở"/"Tải về"
-        không phải đợi thêm 1 lượt gọi mạng nữa."""
-        pids = {it.get("documentId") for it in self._attach_items if it.get("documentId")}
+        """Lấy sẵn token tải cho file VĂN BẢN (nhóm theo publishDocumentId để đỡ gọi trùng nếu 1
+        văn bản có nhiều file) — lấy trước ngay khi tải xong danh sách, để bấm "Tải file này"/
+        "Tải toàn bộ" không phải đợi thêm 1 lượt gọi mạng nữa. File PHIẾU TRÌNH không cần bước
+        này — url đã có sẵn ngay từ đầu (xem __init__)."""
+        pids = {it.get("documentId") for it in self._doc_attach_items if it.get("documentId")}
         if not pids:
             return
         s = self.session
@@ -4255,24 +4300,45 @@ class ReportDetailWindow(tk.Toplevel):
             self.after(0, lambda: self._attach_tokens.update(tokens))
         threading.Thread(target=worker, daemon=True).start()
 
-    def _selected_attach(self):
-        sel = self.attach_list.curselection()
+    def _selected_attach(self, items_attr, listbox_attr):
+        lb, items = getattr(self, listbox_attr), getattr(self, items_attr)
+        sel = lb.curselection()
         if not sel:
             messagebox.showinfo("Chưa chọn file", "Chọn 1 file trong danh sách trước.", parent=self)
             return None
-        return self._attach_items[sel[0]]
+        return items[sel[0]]
+
+    def _selected_attach_any(self):
+        """Cho nút "Tải file này" DÙNG CHUNG — dò cả 2 khung (phiếu trình/văn bản) xem khung nào
+        đang có file được chọn. 2 khung tự bỏ chọn của nhau (xem __init__) nên chỉ có tối đa 1
+        khung có chọn tại 1 thời điểm — không mập mờ chọn nhầm khung nào."""
+        for items_attr, listbox_attr in (("_report_attach_items", "report_attach_list"),
+                                          ("_doc_attach_items", "doc_attach_list")):
+            sel = getattr(self, listbox_attr).curselection()
+            if sel:
+                return getattr(self, items_attr)[sel[0]]
+        messagebox.showinfo("Chưa chọn file",
+                             "Chọn 1 file trong danh sách (phiếu trình hoặc văn bản) trước.", parent=self)
+        return None
+
+    def _attach_name(self, it):
+        return it.get("name") or it.get("draftDocumentName") or "file"
 
     def _attach_url(self, it):
+        # File phiếu trình đã có sẵn url ngay từ đầu; file văn bản phải tra theo token đã lấy
+        # riêng (xem _fetch_attach_tokens) — nơi gọi không cần biết khác biệt này.
+        if it.get("url"):
+            return it["url"]
         aid = it.get("draftDocumentId")
         info = self._attach_tokens.get(aid)
         if not info:
             return None
         return f"{BASE}/uploadiframe!openFile.do?token={info['token']}&attachId={aid}"
 
-    def _open_attach(self):
+    def _open_attach(self, items_attr, listbox_attr):
         """Bấm đúp — xem nhanh bằng ứng dụng mặc định của máy, GIỮ NGUYÊN watermark (đây là
         hành động xem thật, hệ thống tự đóng dấu y như khi bạn xem trên web — không xoá gì)."""
-        it = self._selected_attach()
+        it = self._selected_attach(items_attr, listbox_attr)
         if it is None:
             return
         url = self._attach_url(it)
@@ -4280,7 +4346,7 @@ class ReportDetailWindow(tk.Toplevel):
             messagebox.showwarning("Chưa sẵn sàng",
                                     "Đang lấy đường dẫn tải file, thử lại sau vài giây.", parent=self)
             return
-        name = it.get("draftDocumentName") or "file"
+        name = self._attach_name(it)
         dest = os.path.join(_new_gen_tmpdir("voffice_view_"), name)
         dlg = _ConvertingDialog(self, f"Đang tải để xem: {name}…")
         s = self.session
@@ -4301,10 +4367,10 @@ class ReportDetailWindow(tk.Toplevel):
         threading.Thread(target=worker, daemon=True).start()
 
     def _download_selected_attach(self):
-        """Nút "Tải file này" — khác _open_attach ở chỗ LƯU VĨNH VIỄN theo đường dẫn tự chọn,
-        và XOÁ WATERMARK trước khi lưu (đây là tải về để dùng thật, không phải xem thoáng qua —
-        xem strip_view_watermark)."""
-        it = self._selected_attach()
+        """Nút "Tải file này" (thanh trên cùng, DÙNG CHUNG cho cả 2 khung) — khác _open_attach ở
+        chỗ LƯU VĨNH VIỄN theo đường dẫn tự chọn, và XOÁ WATERMARK trước khi lưu (đây là tải về
+        để dùng thật, không phải xem thoáng qua — xem strip_view_watermark)."""
+        it = self._selected_attach_any()
         if it is None:
             return
         url = self._attach_url(it)
@@ -4312,7 +4378,7 @@ class ReportDetailWindow(tk.Toplevel):
             messagebox.showwarning("Chưa sẵn sàng",
                                     "Đang lấy đường dẫn tải file, thử lại sau vài giây.", parent=self)
             return
-        name = it.get("draftDocumentName") or "file"
+        name = self._attach_name(it)
         dest = filedialog.asksaveasfilename(parent=self, initialfile=name,
                                              defaultextension=os.path.splitext(name)[1])
         if not dest:
@@ -4332,24 +4398,24 @@ class ReportDetailWindow(tk.Toplevel):
         threading.Thread(target=worker, daemon=True).start()
 
     def _download_all_attachs(self):
-        """Nút "Tải toàn bộ các file" — tải hết danh sách vào 1 thư mục tự chọn, mỗi file cũng
-        được xoá watermark trước khi lưu như _download_selected_attach. Lỗi từng file (nếu có)
-        không dừng cả loạt — báo gộp lại cuối cùng (best-effort, giống triết lý các chỗ tải
-        hàng loạt khác trong chương trình)."""
-        if not self._attach_items:
+        """Nút "Tải toàn bộ tài liệu" (thanh trên cùng) — tải TOÀN BỘ, gồm cả file phiếu trình
+        lẫn mọi văn bản, vào 1 thư mục tự chọn; mỗi file cũng được xoá watermark trước khi lưu
+        như _download_selected_attach. Lỗi từng file (nếu có) không dừng cả loạt — báo gộp lại
+        cuối cùng (best-effort, giống triết lý các chỗ tải hàng loạt khác trong chương trình)."""
+        items = list(self._report_attach_items) + list(self._doc_attach_items)
+        if not items:
             messagebox.showinfo("Không có file", "Phiếu trình này chưa có file đính kèm nào.", parent=self)
             return
         folder = filedialog.askdirectory(parent=self, title="Chọn thư mục lưu toàn bộ file")
         if not folder:
             return
-        items = list(self._attach_items)
         n = len(items)
         dlg = _ConvertingDialog(self, f"Đang tải file (0/{n})…")
         s, username = self.session, getattr(self.master, "_logged_user", None)
         def worker():
             ok, failed = [], []
             for i, it in enumerate(items, start=1):
-                name = it.get("draftDocumentName") or f"file_{i}"
+                name = self._attach_name(it) or f"file_{i}"
                 self.after(0, lambda i=i, name=name: dlg.set_status(f"Đang tải file ({i}/{n}): {name}…"))
                 url = self._attach_url(it)
                 if not url:
