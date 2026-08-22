@@ -1120,6 +1120,39 @@ def fetch_document_of_report(s, report_id, log=lambda *a: None):
         log(f"   • Không tra được chi tiết văn bản của phiếu trình: {e!r}")
         return []
 
+def fetch_report_update_selects(s, report_id, log=lambda *a: None):
+    """Mở đúng trang Sửa (prepareUpdate.do) và đọc 2 select ẩn trang tự nhúng sẵn — LUỒNG và HỒ
+    SƠ CÔNG VIỆC ĐÃ DÙNG THẬT cho phiếu này (không phải danh sách để chọn) — xác nhận qua HAR
+    thật ('thu hồi trình lại.har'): `reportForm.flowAsignIdSelected`/
+    `reportForm.profileFlowAsignIdSelected` mỗi cái chỉ có ĐÚNG 1 <option>, chính là lựa chọn
+    của lần trình trước khi bị thu hồi (không phải mặc định/gợi ý). Trả về (flow, profile) —
+    mỗi cái {'id','name'} hoặc None nếu không đọc được."""
+    try:
+        r = s.post(BASE + "/voReport!prepareUpdate.do", params={"reportId": report_id},
+                   data={"dojo.preventCache": now_ms()}, timeout=30)
+        flow_opts = _parse_select_options(r.text, "flowAsignIdSelected") or []
+        profile_opts = _parse_select_options(r.text, "profileFlowAsignIdSelected") or []
+        flow = {"id": flow_opts[0]["id"], "name": flow_opts[0]["name"]} if flow_opts else None
+        profile = {"id": profile_opts[0]["id"], "name": profile_opts[0]["name"]} if profile_opts else None
+        return flow, profile
+    except Exception as e:
+        log(f"   • Không đọc được luồng/hồ sơ đã dùng của phiếu trình: {e!r}")
+        return None, None
+
+def fetch_report_flow_nodes(s, report_id, flow_id, log=lambda *a: None):
+    """Danh sách CHÍNH XÁC người đã được gán cho từng bước của luồng lúc trình phiếu này — khác
+    resolve_flow_signers() ở chỗ đây không phải suy đoán/candidate mặc định mà là lựa chọn THẬT
+    server còn nhớ cho đúng phiếu này (xác nhận qua HAR: trang Sửa tự gọi đúng API này với
+    flowId lấy từ select ẩn ở fetch_report_update_selects, để tự điền lại y hệt luồng+người đã
+    trình trước khi thu hồi). Trả [] nếu không tra được."""
+    try:
+        r = s.post(BASE + "/voPublishDocument!onSearchNodeOfReport.do",
+                   params={"reportId": report_id, "flowId": flow_id}, timeout=30)
+        return r.json().get("items") or []
+    except Exception as e:
+        log(f"   • Không tra được người ký cũ theo luồng của phiếu trình: {e!r}")
+        return []
+
 def fetch_edit_draft_upload_url(s, publish_document_id, log=lambda *a: None):
     """Mở form Sửa 1 văn bản đã có (onEditDraft) để lấy URL upload riêng cho lần sửa này — tái
     dùng đúng extract_upload_urls() đã có (dùng cho form tạo mới), chỉ khác nguồn HTML."""
@@ -2727,6 +2760,32 @@ class FlowSignerPanel(ttk.LabelFrame):
     def get_nodes(self):
         return self._nodes
 
+    def load_from_report(self, flow_id, nodes):
+        """Nạp thẳng danh sách bước ĐÃ GÁN THỰC TẾ của 1 phiếu trình cũ (xem
+        fetch_report_flow_nodes, dùng khi Sửa phiếu vừa thu hồi) — khác load() ở chỗ không tra
+        candidate/không cho chọn lại từng bước, vì đây là lựa chọn đã CHỐT thật của lần trình
+        trước, không phải gợi ý cần xác nhận. Đổi luồng khác ở combobox vẫn tự quay lại load()
+        bình thường (tự tra candidate) — đây chỉ là lối tắt khôi phục, không khoá cứng."""
+        self._flow_id = flow_id
+        self._loading = False
+        self._nodes = [dict(n, name=n.get("nodeName") or n.get("name"), candidates=[]) for n in nodes]
+        self._pick_vars = {}
+        for w in self.rows_frame.winfo_children():
+            w.destroy()
+        if not self._nodes:
+            self.pack_forget()
+            return
+        self.pack(fill="x", pady=(6, 0))
+        self.status.config(text=f"Đã khôi phục {len(self._nodes)} bước ký của lần trình trước "
+                                 "khi thu hồi — đổi luồng khác nếu muốn chọn lại.",
+                            foreground="#2e7d32")
+        for n in self._nodes:
+            row = ttk.Frame(self.rows_frame); row.pack(fill="x", pady=(2, 4))
+            ttk.Label(row, text=n.get("name") or "(không rõ tên bước)", wraplength=380,
+                      justify="left", foreground="gray").pack(anchor="w", fill="x")
+            ttk.Label(row, text=f"{n.get('fullName') or ''} — {n.get('roleName') or ''}",
+                      wraplength=380, justify="left").pack(anchor="w")
+
 
 class _ConvertingDialog(tk.Toplevel):
     """Cửa sổ chờ nhỏ, hiện trong lúc chuyển .docx -> PDF tuần tự ngay sau khi bấm CHẠY (trước
@@ -3965,7 +4024,8 @@ class App(tk.Tk):
         dlg = _ConvertingDialog(self, f"Đang tải dữ liệu phiếu #{report_id} để sửa…")
 
         def worker():
-            result = {"report_local": None, "extra_locals": [], "docs": [], "report_existing_attach_ids": []}
+            result = {"report_local": None, "extra_locals": [], "docs": [], "report_existing_attach_ids": [],
+                      "report_mode": "ban_hanh"}
             # 1. File của chính Phiếu trình (+ tài liệu thêm) — link kèm token đã có sẵn
             #    trong attachPathIcons của item (không cần API mới).
             hrefs = parse_report_attach_icons(item.get("attachPathIcons"))
@@ -4000,6 +4060,11 @@ class App(tk.Tk):
             attachs = fetch_report_attachs(s, report_id, self.log)
             doc_items = fetch_document_of_report(s, report_id, self.log)
             n_docs = len(doc_items)
+            # Không có văn bản riêng nào (onSearchDocumentOfReport rỗng) => đúng là phiếu "xin ý
+            # kiến" (xác nhận qua HAR thật: loại này không hề tạo văn bản/onInsertDraft — xem
+            # run_pipeline) — tự tích lại đúng checkbox loại phiếu trình khi mở ra sửa, khỏi phải
+            # tự nhớ/tự chọn lại tay (xem _apply_edit_data/_set_report_mode).
+            result["report_mode"] = "ban_hanh" if doc_items else "xin_y_kien"
             for di, doc_item in enumerate(doc_items, start=1):
                 pid = doc_item.get("publishDocumentId")
                 self.after(0, lambda di=di, doc_item=doc_item: dlg.set_status(
@@ -4057,10 +4122,28 @@ class App(tk.Tk):
                             self.log(f"   • Không tải được file '{name}' (publishDocumentId={pid}): {e!r} "
                                      "— tự chọn lại file này trước khi bấm CHẠY.")
                 result["docs"].append(doc)
+
+            # 3. Luồng ký + người ký ĐÃ DÙNG THẬT của phiếu này (khác Nơi nhận/Văn bản ở trên —
+            #    đọc từ prepareUpdate.do + onSearchNodeOfReport, xem fetch_report_update_selects/
+            #    fetch_report_flow_nodes) — để tự chọn lại ĐÚNG luồng + người ký của lần trình
+            #    trước khi bị thu hồi, không phải suy đoán/mặc định như trước đây (xác nhận qua
+            #    HAR 'thu hồi trình lại.har').
+            self.after(0, lambda: dlg.set_status("Đang tra luồng ký đã dùng…"))
+            flow_opt, profile_opt = fetch_report_update_selects(s, report_id, self.log)
+            result["flow"] = flow_opt
+            result["flow_profile"] = profile_opt
+            result["flow_nodes"] = fetch_report_flow_nodes(s, report_id, flow_opt["id"], self.log) \
+                if flow_opt else []
+
             self.after(0, lambda: (dlg.close(), self._apply_edit_data(item, result)))
         threading.Thread(target=worker, daemon=True).start()
 
     def _apply_edit_data(self, item, result):
+        # Tự tích lại đúng checkbox loại phiếu trình TRƯỚC khi điền dữ liệu — nếu là "xin ý
+        # kiến", tab "Văn bản"/"Nơi nhận" khoá xám ngay từ đây nên các bước điền doc_sections/
+        # nơi nhận bên dưới coi như vô hại (widget vẫn được điền nhưng ẩn sau tab đã khoá), và
+        # câu nhảy tab cuối hàm sẽ tự về "Phiếu trình" thay vì "Văn bản" (xem _show_compose_tab).
+        self._set_report_mode(result.get("report_mode", "ban_hanh"))
         if result["report_local"]:
             self.file_report.set(result["report_local"])
         for p in result["extra_locals"]:
@@ -4095,16 +4178,44 @@ class App(tk.Tk):
             if fid == item.get("fileId"):
                 self.work_profile.set(name); break
 
-        self._fill_recipients_best_effort(first)
+        # Nơi nhận là field CỦA TỪNG văn bản (receive_*) — gộp (union) từ TẤT CẢ văn bản trong
+        # phiếu, không chỉ văn bản đầu, nếu không nơi nhận riêng của văn bản 2 trở đi bị bỏ sót.
+        for d in docs:
+            self._fill_recipients_best_effort(d)
 
-        self.log(f"— Đã điền xong dữ liệu phiếu #{item.get('reportId')} — kiểm tra lại rồi bấm CHẠY. "
-                  "Luồng trình/Người ký KHÔNG tự chọn lại — tự chọn lại nếu cần. —")
+        flow_restored = self._apply_flow_restore(
+            result.get("flow"), result.get("flow_profile"), result.get("flow_nodes") or [])
+
+        flow_note = ("đã tự khôi phục ĐÚNG luồng + người ký của lần trình trước khi thu hồi"
+                     if flow_restored else
+                     "Luồng trình/Người ký KHÔNG tự chọn lại được — tự chọn lại")
+        self.log(f"— Đã điền xong dữ liệu phiếu #{item.get('reportId')} — {flow_note}. "
+                  "Kiểm tra lại rồi bấm CHẠY. —")
         self._refresh_readiness()
         # Dữ liệu vừa tự điền nằm rải trên nhiều tab (Văn bản/Nơi nhận) — với giao diện 4 tab
         # mới, nếu không tự nhảy sang, người dùng đang đứng ở tab khác (vd "Phiếu trình") sẽ
         # tưởng nhầm là chưa điền được gì. Nhảy sang "Văn bản" trước (file/nội dung cần soát kỹ
         # nhất trước khi bấm CHẠY) — "Nơi nhận" xem badge cảnh báo trên sidebar để biết cần ghé qua.
         self._show_compose_tab("Văn bản")
+
+    def _apply_flow_restore(self, flow_opt, profile_opt, flow_nodes):
+        """Chọn lại ĐÚNG luồng + tự điền lại ĐÚNG người đã ký của lần trình trước khi thu hồi
+        (xem fetch_report_update_selects/fetch_report_flow_nodes) — khác
+        _fill_recipients_best_effort (đoán theo tên) ở chỗ đây là lựa chọn THẬT server còn nhớ
+        cho đúng phiếu này, không phải suy đoán. Trả True nếu khôi phục được."""
+        if not flow_opt:
+            return False
+        flow_id, flow_name = flow_opt["id"], flow_opt["name"]
+        if flow_name not in self._flow_by_name:
+            # Luồng cũ không nằm trong danh sách "quen" đang hiện (vd luồng ít dùng) — tự thêm
+            # vào cuối combobox để chọn/hiển thị được, không đụng tới danh sách gốc từ web.
+            self._flow_by_name[flow_name] = flow_id
+            self.flow.config(values=list(self.flow.cget("values")) + [flow_name])
+        self.flow.set(flow_name)   # .set() không tự bắn <<ComboboxSelected>> — không đè lên load_from_report bên dưới
+        self.flow_panel.load_from_report(flow_id, flow_nodes)
+        if profile_opt and profile_opt["name"] in self._profile_by_name:
+            self.work_profile.set(profile_opt["name"])
+        return True
 
     def _fill_recipients_best_effort(self, doc):
         """Điền lại Nơi nhận từ TÊN (không có ID) bằng khớp gần nhất trong cây đơn vị — best
