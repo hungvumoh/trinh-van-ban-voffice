@@ -917,6 +917,17 @@ def save_report_draft(s, cfg, report_attach, report_sign, documents, log, sign="
     q["token"] = reload_token(s, log)
 
     params = decode_params([list(p) for p in TPL["saveReport"]["params"]])
+    # reportType: "1" = Trình ban hành văn bản (mặc định, có văn bản riêng cần ký/cấp số),
+    # "2" = Trình xin ý kiến (chỉ phiếu trình + tài liệu kèm, KHÔNG có văn bản riêng — xác nhận
+    # qua HAR thật: request loại này không hề có draftDocumentGridForm[i]). Mẫu lưu sẵn giá trị
+    # "1" (chụp từ luồng ban hành) nên phải GHI ĐÈ tường minh, không để ngầm định theo mẫu.
+    xin_y_kien = cfg.get("report_mode") == "xin_y_kien"
+    set_param(params, "reportForm.reportType", "2" if xin_y_kien else "1")
+    # Xoá sạch draftDocumentGridForm[*] còn sót lại từ mẫu trước khi ghi lại theo đúng
+    # `documents` truyền vào — nếu không, "Trình xin ý kiến" (documents=[]) sẽ vẫn gửi kèm dòng
+    # draftDocumentGridForm[0] cũ của mẫu (publishDocumentId/code... của 1 văn bản không liên
+    # quan), sai với thực tế loại phiếu này không có văn bản riêng.
+    params = [p for p in params if not p[0].startswith("draftDocumentGridForm")]
     if work_profile_id:
         set_param(params, "reportForm.profileFlowAsignId", work_profile_id)
         set_param(params, "reportForm.profileFlowAsign", work_profile_name or "")
@@ -1300,15 +1311,22 @@ PIPELINE_PHASES = [
 ]
 
 def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
-    # Mỗi văn bản dự thảo trong cfg["documents"] có file + loại VB/số/trích yếu RIÊNG (xác nhận
-    # qua HAR "luồng trình 2 văn bản một lúc"): mỗi văn bản upload riêng, onInsertDraft riêng
-    # (ra publishDocumentId riêng), rồi phiếu trình liệt kê tất cả qua draftDocumentGridForm[i].
+    # 2 loại phiếu trình (chọn ở checkbox "Loại phiếu trình", xem _set_report_mode):
+    #  - "ban_hanh" (mặc định): mỗi văn bản dự thảo trong cfg["documents"] có file + loại VB/số/
+    #    trích yếu RIÊNG — mỗi văn bản upload riêng, onInsertDraft riêng (ra publishDocumentId
+    #    riêng), rồi phiếu trình liệt kê tất cả qua draftDocumentGridForm[i] (xác nhận qua HAR
+    #    "luồng trình 2 văn bản một lúc" — file đó thực ra là 1 phiếu "xin ý kiến", xem nhánh dưới).
+    #  - "xin_y_kien": KHÔNG có văn bản riêng — chỉ phiếu trình + tài liệu kèm, gộp phẳng vào
+    #    đúng report_files/report_attach; không hề gọi onInsertDraft, không có draftDocumentGridForm
+    #    (xác nhận qua chính HAR "luồng trình 2 văn bản một lúc": reportType=2, onSearchDocumentOfReport
+    #    trả về rỗng, onUpdate không có field draftDocumentGridForm nào cả).
+    xin_y_kien = cfg.get("report_mode") == "xin_y_kien"
     all_documents = [dict(d) for d in (cfg.get("documents") or [])]
-    documents = [d for d in all_documents if d.get("file_draft_main")]
+    documents = [] if xin_y_kien else [d for d in all_documents if d.get("file_draft_main")]
     report_main = cfg.get("file_report_main") or None
     report_files = ([report_main] if report_main else []) + list(cfg.get("files_report_extra") or [])
     borrowed_report_as_draft = False
-    if not documents:            # thử nghiệm: chưa chọn văn bản nào thì dùng tạm file phiếu trình
+    if not xin_y_kien and not documents:   # thử nghiệm: chưa chọn văn bản nào thì dùng tạm file phiếu trình
         documents = [{"doc_type": "", "code": "", "abstract": "",
                       "file_draft_main": None, "files_draft_extra": []}]
         borrowed_report_as_draft = True
@@ -1316,7 +1334,8 @@ def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
     n_docs = len(documents)
     total = (5 + n_docs) if check_only else (6 + 2 * n_docs)   # +1 so với trước = bước "Xác minh"
     log(f"Chế độ: {'CHỈ KIỂM TRA (không ghi)' if check_only else 'LƯU NHÁP thật'} · {total} bước"
-        + (f" · {n_docs} văn bản" if not borrowed_report_as_draft else ""))
+        + (" · TRÌNH XIN Ý KIẾN (không có văn bản riêng)" if xin_y_kien else
+           (f" · {n_docs} văn bản" if not borrowed_report_as_draft else "")))
     n = [0]
     def nn():
         n[0] += 1
@@ -2990,12 +3009,14 @@ class App(tk.Tk):
             self._NAV_FG = style.lookup("TLabel", "foreground") or "#e0e0e0"
             self._NAV_FG_ACTIVE = "#7ec3ff"
             self._NAV_ACCENT_ACTIVE = "#4da3ff"
+            self._NAV_FG_DISABLED = "#5a5a5a"
         else:                  # nền sáng
             self._NAV_BG = "#f5f5f5"
             self._NAV_BG_ACTIVE = "#e3f2fd"
             self._NAV_FG = "#333333"
             self._NAV_FG_ACTIVE = "#0d47a1"
             self._NAV_ACCENT_ACTIVE = "#1976d2"
+            self._NAV_FG_DISABLED = "#b0b0b0"
 
         # Màu sọc xen kẽ cho bảng danh sách phiếu trình (xem _build_report_tree) — tính từ
         # đúng màu nền Treeview thật của theme, không hardcode, để không lệch tông sáng/tối.
@@ -3022,12 +3043,18 @@ class App(tk.Tk):
     # "ngợp" cho người dùng phổ thông. Điều hướng tự do (không phải wizard bắt buộc theo thứ
     # tự), nên mỗi tab có dấu ⚠ riêng nếu còn thiếu field bắt buộc (xem _refresh_readiness).
     def _show_compose_tab(self, name):
+        if not self._compose_tab_enabled.get(name, True):
+            return   # tab đang bị "khoá xám" (xem _set_compose_tabs_enabled) — không cho nhảy vào
         for n, page in self._compose_tab_pages.items():
             w = self._compose_tab_widgets[n]
             active = (n == name)
-            bg = self._NAV_BG_ACTIVE if active else self._NAV_BG
-            fg = self._NAV_FG_ACTIVE if active else self._NAV_FG
-            accent_bg = self._NAV_ACCENT_ACTIVE if active else self._NAV_BG
+            enabled = self._compose_tab_enabled.get(n, True)
+            if not enabled:
+                bg, fg, accent_bg = self._NAV_BG, self._NAV_FG_DISABLED, self._NAV_BG
+            else:
+                bg = self._NAV_BG_ACTIVE if active else self._NAV_BG
+                fg = self._NAV_FG_ACTIVE if active else self._NAV_FG
+                accent_bg = self._NAV_ACCENT_ACTIVE if active else self._NAV_BG
             w["row"].config(bg=bg)
             w["accent"].config(bg=accent_bg)
             w["label"].config(bg=bg, fg=fg, font=("", 10, "bold" if active else "normal"))
@@ -3037,6 +3064,18 @@ class App(tk.Tk):
             else:
                 page.pack_forget()
         self._compose_active_tab = name
+
+    def _set_compose_tabs_enabled(self, names, enabled):
+        """Khoá xám (enabled=False) hay mở lại (True) 1 nhóm tab bên sidebar 'Soạn văn bản' —
+        dùng khi chọn 'Trình xin ý kiến' (xem _set_report_mode): khoá 'Văn bản'/'Nơi nhận' vì
+        loại phiếu này không có văn bản riêng, chỉ có phiếu trình + tài liệu kèm phẳng (xác nhận
+        qua HAR thật của 'trình xin ý kiến' — không có onInsertDraft/draftDocumentGridForm)."""
+        for n in names:
+            self._compose_tab_enabled[n] = enabled
+        target = self._compose_active_tab
+        if not enabled and target in names:
+            target = "Phiếu trình"
+        self._show_compose_tab(target)
 
     def _set_compose_tab_badge(self, name, has_warning):
         self._compose_tab_widgets[name]["badge"].config(text="⚠" if has_warning else "")
@@ -3061,6 +3100,21 @@ class App(tk.Tk):
 
     def _build_compose_tab_phieu_trinh(self, parent):
         body = self._make_scrollable(parent)
+
+        # ---- Loại phiếu trình: "Trình ban hành văn bản" (mặc định, có văn bản riêng cần ký +
+        # cấp số) hay "Trình xin ý kiến" (chỉ phiếu trình + tài liệu kèm, không có văn bản riêng
+        # — xác nhận qua HAR thật: reportType=2, không hề có onInsertDraft/draftDocumentGridForm,
+        # mọi file gộp phẳng vào 1 chỗ). 2 checkbox loại trừ nhau (chọn cái này tự bỏ cái kia) —
+        # dùng 2 BooleanVar riêng thay vì Radiobutton theo đúng yêu cầu giao diện dạng checkbox.
+        mode_frame = ttk.LabelFrame(body, text="Loại phiếu trình", padding=6)
+        mode_frame.pack(fill="x", padx=12, pady=(12, 0))
+        self.mode_ban_hanh_var = tk.BooleanVar(value=True)
+        self.mode_xin_y_kien_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(mode_frame, text="Trình ban hành văn bản", variable=self.mode_ban_hanh_var,
+                         command=lambda: self._set_report_mode("ban_hanh")).pack(side="left", padx=(0, 16))
+        ttk.Checkbutton(mode_frame, text="Trình xin ý kiến", variable=self.mode_xin_y_kien_var,
+                         command=lambda: self._set_report_mode("xin_y_kien")).pack(side="left")
+
         g1 = ttk.LabelFrame(body, text="Phiếu trình (không gửi đi)", padding=6)
         g1.pack(fill="x", padx=12, pady=(12, 0))
         f = self._row(g1, "  File phiếu trình:", bold=True)
@@ -3126,6 +3180,20 @@ class App(tk.Tk):
         self.flow_panel = FlowSignerPanel(body, self.session, self.log, self.flow_store)
         # chưa pack() — panel tự hiện/ẩn tuỳ luồng đang chọn đã có sẵn đủ người hay chưa
 
+    def _report_mode(self):
+        return "xin_y_kien" if self.mode_xin_y_kien_var.get() else "ban_hanh"
+
+    def _set_report_mode(self, mode):
+        """2 checkbox 'Trình ban hành văn bản'/'Trình xin ý kiến' loại trừ nhau — gọi khi bấm 1
+        trong 2. 'Trình xin ý kiến' khoá xám tab 'Văn bản' + 'Nơi nhận' (không cần văn bản riêng/
+        nơi nhận — xác nhận qua HAR thật: chỉ có phiếu trình + tài liệu kèm, không có cơ chế văn
+        bản riêng để chọn nơi nhận), người dùng chỉ còn làm việc ở tab 'Phiếu trình' + 'Luồng'."""
+        xin_y_kien = (mode == "xin_y_kien")
+        self.mode_xin_y_kien_var.set(xin_y_kien)
+        self.mode_ban_hanh_var.set(not xin_y_kien)
+        self._set_compose_tabs_enabled(["Văn bản", "Nơi nhận"], enabled=not xin_y_kien)
+        self._refresh_readiness()
+
     # ---------- MÀN 2: SOẠN & LƯU NHÁP ----------
     def _show_main(self):
         self._clear()
@@ -3174,6 +3242,7 @@ class App(tk.Tk):
         COMPOSE_TABS = ("Phiếu trình", "Văn bản", "Nơi nhận", "Luồng")
         self._compose_tab_pages = {}
         self._compose_tab_widgets = {}
+        self._compose_tab_enabled = {name: True for name in COMPOSE_TABS}
         for name in COMPOSE_TABS:
             page = ttk.Frame(content_area)
             self._compose_tab_pages[name] = page
@@ -3406,6 +3475,7 @@ class App(tk.Tk):
         self._editing_report_id = None   # xoá dấu "đang sửa phiếu X" (xem _edit_in_compose)
         self._editing_report_existing_attach_ids = None
         self._cleanup_edit_tmpdirs()
+        self._set_report_mode("ban_hanh")   # về đúng mặc định, mở lại tab Văn bản/Nơi nhận
         self.file_report.set("")
         self.extra_report.clear()
 
@@ -3445,7 +3515,9 @@ class App(tk.Tk):
         _file_logger.info(msg)
 
     def _collect_cfg(self):
+        report_mode = self._report_mode()
         return {
+            "report_mode": report_mode,
             "priority": self.priority.get(),
             "security": self.security.get(),
             "report_content": self.report_content.get("1.0", "end-1c"),
@@ -3462,7 +3534,9 @@ class App(tk.Tk):
             "recv_know": self.recip.get("know"),
             "file_report_main": self.file_report.get(),
             "files_report_extra": self.extra_report.get(),
-            "documents": [ds.get() for ds in self.doc_sections],
+            # "xin ý kiến" không có văn bản riêng (xem run_pipeline) — để rỗng cho khớp thực tế,
+            # tránh PreviewWindow hiện nhầm 1 khung "Văn bản" trống (xem PreviewWindow._build_info).
+            "documents": [] if report_mode == "xin_y_kien" else [ds.get() for ds in self.doc_sections],
             "report_id": getattr(self, "_editing_report_id", None),
             "report_existing_attach_ids": getattr(self, "_editing_report_existing_attach_ids", None),
         }
@@ -3477,15 +3551,18 @@ class App(tk.Tk):
             missing_by_tab["Phiếu trình"].append("File phiếu trình")
         if not self.report_content.get("1.0", "end-1c").strip():
             missing_by_tab["Phiếu trình"].append("Nội dung phiếu")
-        multi = len(self.doc_sections) > 1
-        for i, ds in enumerate(self.doc_sections):
-            tag = f" (văn bản {i+1})" if multi else ""
-            if not ds.abstract.get("1.0", "end-1c").strip():
-                missing_by_tab["Văn bản"].append(f"Trích yếu văn bản{tag}")
-            if not ds.code.get().strip():
-                missing_by_tab["Văn bản"].append(f"Số/ký hiệu{tag}")
-        if not any(self.recip.get(c) for c, _ in RecipientBox.CATS):
-            missing_by_tab["Nơi nhận"].append("Nơi nhận")
+        # "Trình xin ý kiến": tab Văn bản/Nơi nhận đang khoá xám (xem _set_report_mode) — không
+        # đòi hỏi field ở 2 tab đó, không có gì để điền.
+        if self._report_mode() != "xin_y_kien":
+            multi = len(self.doc_sections) > 1
+            for i, ds in enumerate(self.doc_sections):
+                tag = f" (văn bản {i+1})" if multi else ""
+                if not ds.abstract.get("1.0", "end-1c").strip():
+                    missing_by_tab["Văn bản"].append(f"Trích yếu văn bản{tag}")
+                if not ds.code.get().strip():
+                    missing_by_tab["Văn bản"].append(f"Số/ký hiệu{tag}")
+            if not any(self.recip.get(c) for c, _ in RecipientBox.CATS):
+                missing_by_tab["Nơi nhận"].append("Nơi nhận")
         if not self.flow_panel.is_ready():
             missing_by_tab["Luồng"].append("chọn người ký cho luồng")
 
