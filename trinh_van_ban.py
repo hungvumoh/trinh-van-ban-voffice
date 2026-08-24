@@ -1099,15 +1099,33 @@ def find_latest_history_note(s, report_id, log=lambda *a: None):
 
 def fetch_report_attachs(s, report_id, log=lambda *a: None):
     """Danh sách file đính kèm (văn bản dự thảo) của 1 phiếu trình — mỗi item có
-    draftDocumentName/draftDocumentPath/documentAbstract/documentId. Trả [] nếu không tra được."""
-    try:
-        r = s.post(BASE + "/voReport!getAttachs.do",
-                   params={"reportId": report_id, "attachType": "draftSubmission"},
-                   data={"q": "*", "start": 0, "count": 20, "startval": 0}, timeout=30)
-        return r.json().get("items") or []
-    except Exception as e:
-        log(f"   • Không tra được file đính kèm của phiếu trình: {e!r}")
-        return []
+    draftDocumentName/draftDocumentPath/documentAbstract/documentId. Tự lặp lấy HẾT các trang
+    (server trả mới nhất trước — trước đây chỉ xin count=20 dòng đầu nên phiếu nhiều văn bản/
+    file (vd 23 văn bản) bị cắt cụt: giữ được các văn bản THÊM SAU/upload gần đây, MẤT các văn
+    bản thêm ĐẦU TIÊN — xác nhận qua phản hồi người dùng khi Copy 1 phiếu 23 văn bản chỉ lấy
+    được ~13 văn bản cuối). Dừng khi 1 trang trả về ít hơn page_size dòng (hết dữ liệu). Trả []
+    nếu không tra được."""
+    items = []
+    start = 0
+    page_size = 200
+    while True:
+        try:
+            r = s.post(BASE + "/voReport!getAttachs.do",
+                       params={"reportId": report_id, "attachType": "draftSubmission"},
+                       data={"q": "*", "start": start, "count": page_size, "startval": start},
+                       timeout=30)
+            page = r.json().get("items") or []
+        except Exception as e:
+            log(f"   • Không tra được file đính kèm của phiếu trình: {e!r}")
+            break
+        items.extend(page)
+        if len(page) < page_size:
+            break
+        start += page_size
+        if start > 5000:   # chốt an toàn — tránh lặp vô hạn nếu server luôn trả đủ page_size
+            log("   • Danh sách file đính kèm quá dài (>5000 dòng) — dừng tải thêm.")
+            break
+    return items
 
 def fetch_document_of_report(s, report_id, log=lambda *a: None):
     """Chi tiết từng văn bản (Loại VB/Số ký hiệu/Trích yếu/Nơi nhận/Độ khẩn-mật/Người ký) của 1
