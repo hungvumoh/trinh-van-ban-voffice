@@ -1103,28 +1103,41 @@ def fetch_report_attachs(s, report_id, log=lambda *a: None):
     (server trả mới nhất trước — trước đây chỉ xin count=20 dòng đầu nên phiếu nhiều văn bản/
     file (vd 23 văn bản) bị cắt cụt: giữ được các văn bản THÊM SAU/upload gần đây, MẤT các văn
     bản thêm ĐẦU TIÊN — xác nhận qua phản hồi người dùng khi Copy 1 phiếu 23 văn bản chỉ lấy
-    được ~13 văn bản cuối). Dừng khi 1 trang trả về ít hơn page_size dòng (hết dữ liệu). Trả []
-    nếu không tra được."""
+    được ~13 văn bản cuối).
+
+    QUAN TRỌNG: KHÔNG dùng "trang vừa nhận ít hơn số ta XIN (count)" làm dấu hiệu hết dữ liệu —
+    server có thể tự giới hạn số dòng trả về mỗi lần THẤP HƠN số ta xin bất kể ta xin bao nhiêu
+    (bản gốc hardcode count=20 rất có thể chính là do đã thử và thấy server chỉ chịu trả tối đa
+    20 dòng/lần — xin 200 vẫn có thể chỉ nhận lại 20). Nếu lấy "ít hơn count" làm mốc dừng thì
+    vẫn dừng ngay sau trang 1 y hệt lỗi cũ. Thay vào đó: mỗi lần chỉ CỘNG DỒN đúng số dòng THỰC
+    NHẬN được (không phải số đã xin) vào `start` cho lần gọi kế tiếp, và CHỈ dừng khi 1 trang trả
+    về HOÀN TOÀN RỖNG (0 dòng) — cách này đúng bất kể server tự giới hạn xuống bao nhiêu, miễn
+    server tôn trọng đúng `start` (đã xác nhận: bản gốc start=0/count=20 luôn trả đúng 20 dòng
+    đầu, không có lý do để nghi server phớt lờ `start`). Trả [] nếu không tra được."""
     items = []
     start = 0
-    page_size = 200
+    request_count = 200
+    guard = 0
     while True:
+        guard += 1
+        if guard > 200:   # chốt an toàn — tránh lặp vô hạn nếu server có hành vi bất thường
+            log(f"   • Danh sách file đính kèm quá dài (>{len(items)} dòng sau {guard} lần gọi) "
+                "— dừng tải thêm, có thể còn thiếu.")
+            break
         try:
             r = s.post(BASE + "/voReport!getAttachs.do",
                        params={"reportId": report_id, "attachType": "draftSubmission"},
-                       data={"q": "*", "start": start, "count": page_size, "startval": start},
+                       data={"q": "*", "start": start, "count": request_count, "startval": start},
                        timeout=30)
             page = r.json().get("items") or []
         except Exception as e:
             log(f"   • Không tra được file đính kèm của phiếu trình: {e!r}")
             break
+        if not page:
+            break
         items.extend(page)
-        if len(page) < page_size:
-            break
-        start += page_size
-        if start > 5000:   # chốt an toàn — tránh lặp vô hạn nếu server luôn trả đủ page_size
-            log("   • Danh sách file đính kèm quá dài (>5000 dòng) — dừng tải thêm.")
-            break
+        start += len(page)   # cộng đúng số THỰC NHẬN, không phải request_count đã xin
+    log(f"   • Đã tải {len(items)} dòng file đính kèm của phiếu trình (qua {guard} lần gọi).")
     return items
 
 def fetch_document_of_report(s, report_id, log=lambda *a: None):
@@ -4127,6 +4140,10 @@ class App(tk.Tk):
             attachs = fetch_report_attachs(s, report_id, self.log)
             doc_items = fetch_document_of_report(s, report_id, self.log)
             n_docs = len(doc_items)
+            # Log số lượng thấy được NGAY — trước đây thiếu dòng này nên văn bản không khớp
+            # được file cứ lặng lẽ trôi qua (giao diện chỉ thấy "lướt nhanh" không hiểu vì sao,
+            # xem phản hồi người dùng) — giờ luôn thấy rõ tổng số để đối chiếu với số thật.
+            self.log(f"   • Phiếu #{report_id}: {n_docs} văn bản, {len(attachs)} dòng file đính kèm.")
             # Không có văn bản riêng nào (onSearchDocumentOfReport rỗng) => đúng là phiếu "xin ý
             # kiến" (xác nhận qua HAR thật: loại này không hề tạo văn bản/onInsertDraft — xem
             # run_pipeline) — tự tích lại đúng checkbox loại phiếu trình khi mở ra sửa, khỏi phải
@@ -4134,10 +4151,16 @@ class App(tk.Tk):
             result["report_mode"] = "ban_hanh" if doc_items else "xin_y_kien"
             for di, doc_item in enumerate(doc_items, start=1):
                 pid = doc_item.get("publishDocumentId")
-                self.after(0, lambda di=di, doc_item=doc_item: dlg.set_status(
-                    f"Đang tải văn bản ({di}/{n_docs}): "
-                    f"{doc_item.get('code') or doc_item.get('documentType') or '(chưa rõ số/loại)'}…"))
-                own_files = [a for a in attachs if a.get("documentId") == pid]
+                code_or_type = doc_item.get("code") or doc_item.get("documentType") or "(chưa rõ số/loại)"
+                self.after(0, lambda di=di, code_or_type=code_or_type: dlg.set_status(
+                    f"Đang tải văn bản ({di}/{n_docs}): {code_or_type}…"))
+                # So khớp bằng str() — tránh lệch kiểu int/str giữa 2 API khác nhau (publishDocumentId
+                # ở đây, documentId ở danh sách file) khiến so sánh == âm thầm luôn sai.
+                own_files = [a for a in attachs if str(a.get("documentId")) == str(pid)] if pid else []
+                if not own_files:
+                    self.log(f"   • ⚠ Văn bản {di}/{n_docs} ({code_or_type}, publishDocumentId={pid}): "
+                             f"không khớp được file nào trong {len(attachs)} dòng vừa tải — "
+                             "cần tự chọn lại file cho văn bản này trước khi bấm CHẠY.")
                 doc = {
                     "doc_type": doc_item.get("documentType") or "",
                     "code": doc_item.get("code") or "",
