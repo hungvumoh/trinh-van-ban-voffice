@@ -812,9 +812,11 @@ def resolve_nodes(s, nodes, tree, log):
     return ";".join(names), ";".join(ids)
 
 def save_document(s, cfg, doc, draft_attach, draft_sign, log, existing_pid=None):
-    """Lưu 1 văn bản dự thảo (onInsertDraft). `doc` mang loại VB/số ký hiệu/trích yếu RIÊNG
-    của văn bản này (mỗi văn bản trong 1 phiếu trình có thể khác loại/khác số/khác trích yếu —
-    chỉ nơi nhận/độ khẩn/độ mật/luồng trình là dùng chung, lấy từ cfg). Trả về publishDocumentId.
+    """Lưu 1 văn bản dự thảo (onInsertDraft). `doc` mang loại VB/số ký hiệu/trích yếu/NƠI NHẬN
+    RIÊNG của văn bản này (mỗi văn bản trong 1 phiếu trình có thể khác loại/khác số/khác trích
+    yếu/khác nơi nhận — xác nhận qua HAR "2 văn bản 2 nơi nhận trong cùng tờ trình": trường
+    receiveInside... nằm trong chính request onInsertDraft của từng văn bản, không dùng chung
+    cho cả phiếu; chỉ độ khẩn/độ mật/luồng trình là dùng chung, lấy từ cfg). Trả về publishDocumentId.
     `existing_pid`: có giá trị khi SỬA 1 văn bản đã có (thay vì tạo mới) — server hiểu là cập
     nhật đúng văn bản đó (xác nhận qua HAR: request giống hệt tạo mới, chỉ khác đúng field
     publishDocumentId mang ID cũ thay vì để trống)."""
@@ -849,7 +851,7 @@ def save_document(s, cfg, doc, draft_attach, draft_sign, log, existing_pid=None)
         "save":    ("receiveSaveDepartment", "receiveSaveDepartmentId", "internal"),
         "know":    ("receiveToKnow",  "receiveToKnowId",  "internal"),
     }.items():
-        nodes = cfg.get("recv_" + cat) or []
+        nodes = doc.get("recv_" + cat) or []
         if nodes:
             log(f"• Giải ID nơi nhận ({nm})…")
             n, i = resolve_nodes(s, nodes, tree, log)
@@ -2439,16 +2441,20 @@ class FileList(ttk.Frame):
 
 class DocumentSection(ttk.LabelFrame):
     """1 văn bản trong nhóm VĂN BẢN — file (chính + tài liệu gửi kèm) + loại VB/số ký hiệu/
-    trích yếu RIÊNG của văn bản này (1 phiếu trình có thể gửi nhiều văn bản khác loại/khác số).
-    Chọn file chính sẽ tự điền loại VB/số/trích yếu (và tự chọn Luồng trình dùng chung) như
-    màn hình cũ, chỉ khác là áp dụng riêng cho văn bản này."""
+    trích yếu + NƠI NHẬN, tất cả RIÊNG của văn bản này (1 phiếu trình có thể gửi nhiều văn bản
+    khác loại/khác số/khác nơi nhận — xác nhận qua HAR thật: mỗi văn bản gọi onInsertDraft
+    riêng, và trường receiveInside/receiveInsideId... nằm trong CHÍNH request đó của từng văn
+    bản, không phải trường dùng chung của phiếu trình). Chọn file chính sẽ tự điền loại VB/số/
+    trích yếu (và tự chọn Luồng trình dùng chung) như màn hình cũ, chỉ khác là áp dụng riêng
+    cho văn bản này."""
 
-    def __init__(self, parent, app, on_remove):
+    def __init__(self, parent, app, on_remove, copy_recip_from=None):
         super().__init__(parent, text="Văn bản", padding=6)
         self.app = app
         self.on_remove = on_remove
         self._extract_seq = 0
         self.file_draft = tk.StringVar()
+        self._copy_recip_from = copy_recip_from
 
         # BƯỚC bạn cần làm — nổi bật, chữ đậm, luôn hiện.
         f = ttk.Frame(self); f.pack(fill="x", pady=2)
@@ -2480,6 +2486,28 @@ class DocumentSection(ttk.LabelFrame):
         # vào log kỹ thuật (đã ẩn khỏi giao diện chính, xem App.log).
         self.warn_label = ttk.Label(self, text="", foreground="#c62828", wraplength=420, justify="left")
         self.warn_label.pack(anchor="w", pady=(2, 0))
+
+        # Nơi nhận CỦA RIÊNG văn bản này (xem docstring lớp). copy_recip_from: DocumentSection
+        # liền trước (nếu có) — bấm nút bên dưới để chép sẵn nơi nhận của nó sang, đỡ phải gõ/
+        # tìm lại từ đầu cho trường hợp phổ biến "nhiều văn bản cùng gửi 1 nơi" (vẫn sửa lại
+        # được sau khi chép, không phải mọi văn bản đều bắt buộc giống nhau — xem HAR "2 văn bản
+        # 2 nơi nhận trong cùng tờ trình").
+        if copy_recip_from is not None:
+            ttk.Button(self, text="📋 Sao chép nơi nhận từ văn bản trên",
+                       command=self._do_copy_recip).pack(anchor="w", pady=(6, 0))
+        self.recip = RecipientBox(self, CAY, app.store)
+        self.recip.pack(fill="x", pady=(4, 0))
+
+    def _do_copy_recip(self):
+        other = self._copy_recip_from
+        if other is None:
+            return
+        for c, _ in RecipientBox.CATS:
+            existing = {_node_key(x) for x in self.recip.buckets[c]}
+            for nd in other.recip.buckets[c]:
+                if _node_key(nd) not in existing:
+                    self.recip.buckets[c].append(nd)
+        self.recip._render_chips()
 
     def _set_warning(self, msg):
         self.warn_label.config(text="⚠ " + msg)
@@ -2563,6 +2591,11 @@ class DocumentSection(ttk.LabelFrame):
             "abstract": self.abstract.get("1.0", "end-1c"),
             "file_draft_main": self.file_draft.get(),
             "files_draft_extra": self.extra.get(),
+            "recv_inside": self.recip.get("inside"),
+            "recv_report": self.recip.get("report"),
+            "recv_edoc": self.recip.get("edoc"),
+            "recv_save": self.recip.get("save"),
+            "recv_know": self.recip.get("know"),
             "_existing_pid": getattr(self, "_existing_pid", None),
             "_existing_attach_ids": getattr(self, "_existing_attach_ids", None),
         }
@@ -3197,6 +3230,9 @@ class App(tk.Tk):
         self.report_warning_label.pack(anchor="w", padx=12, pady=(0, 4))
 
     def _build_compose_tab_van_ban(self, parent):
+        # Nơi nhận không còn là tab riêng — mỗi DocumentSection tự mang khung "Nơi nhận" của
+        # chính văn bản đó (xem lớp DocumentSection + thảo luận HAR "2 văn bản 2 nơi nhận trong
+        # cùng tờ trình": nơi nhận là field của TỪNG văn bản, không dùng chung cho cả phiếu).
         body = self._make_scrollable(parent)
         self.doc_sections_frame = ttk.Frame(body)
         self.doc_sections_frame.pack(fill="x", padx=12, pady=(12, 0))
@@ -3205,7 +3241,8 @@ class App(tk.Tk):
         ttk.Button(body, text="+ Thêm văn bản", command=self._add_document_section).pack(
             anchor="w", padx=12, pady=(4, 0))
         ttk.Label(body, text="(File chính của mỗi văn bản = cái cần ký. Bỏ trống hết để thử "
-                              "nghiệm sẽ dùng tạm file phiếu trình.)",
+                              "nghiệm sẽ dùng tạm file phiếu trình. Nơi nhận nằm ngay trong "
+                              "từng khung văn bản bên trên — mỗi văn bản chọn riêng.)",
                   foreground="gray", wraplength=420).pack(anchor="w", padx=12, pady=(4, 10))
 
         f = self._row(body, "Độ khẩn:")
@@ -3215,10 +3252,6 @@ class App(tk.Tk):
         self.security = ttk.Combobox(f, values=[""] + sorted(ENUMS["security"].keys()), state="readonly")
         self.security.set("Bình thường"); self.security.pack(side="left", fill="x", expand=True)
 
-    def _build_compose_tab_noi_nhan(self, parent):
-        body = self._make_scrollable(parent)
-        self.recip = RecipientBox(body, CAY, self.store)
-        self.recip.pack(fill="x", padx=12, pady=(12, 0))
         self.auto_stamp_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(body, text="Tự đánh số chữ ký lên Phiếu trình + các Văn bản theo Luồng trình đã chọn",
                         variable=self.auto_stamp_var).pack(anchor="w", padx=12, pady=(10, 0))
@@ -3244,13 +3277,14 @@ class App(tk.Tk):
 
     def _set_report_mode(self, mode):
         """2 checkbox 'Trình ban hành văn bản'/'Trình xin ý kiến' loại trừ nhau — gọi khi bấm 1
-        trong 2. 'Trình xin ý kiến' khoá xám tab 'Văn bản' + 'Nơi nhận' (không cần văn bản riêng/
-        nơi nhận — xác nhận qua HAR thật: chỉ có phiếu trình + tài liệu kèm, không có cơ chế văn
-        bản riêng để chọn nơi nhận), người dùng chỉ còn làm việc ở tab 'Phiếu trình' + 'Luồng'."""
+        trong 2. 'Trình xin ý kiến' khoá xám tab 'Văn bản' (nơi nhận nằm trong đó, xem
+        DocumentSection) — không cần văn bản riêng/nơi nhận (xác nhận qua HAR thật: chỉ có phiếu
+        trình + tài liệu kèm, không có cơ chế văn bản riêng để chọn nơi nhận), người dùng chỉ
+        còn làm việc ở tab 'Phiếu trình' + 'Luồng'."""
         xin_y_kien = (mode == "xin_y_kien")
         self.mode_xin_y_kien_var.set(xin_y_kien)
         self.mode_ban_hanh_var.set(not xin_y_kien)
-        self._set_compose_tabs_enabled(["Văn bản", "Nơi nhận"], enabled=not xin_y_kien)
+        self._set_compose_tabs_enabled(["Văn bản"], enabled=not xin_y_kien)
         self._refresh_readiness()
 
     # ---------- MÀN 2: SOẠN & LƯU NHÁP ----------
@@ -3298,7 +3332,7 @@ class App(tk.Tk):
         ttk.Separator(body, orient="vertical").pack(side="left", fill="y")
         content_area = ttk.Frame(body); content_area.pack(side="left", fill="both", expand=True)
 
-        COMPOSE_TABS = ("Phiếu trình", "Văn bản", "Nơi nhận", "Luồng")
+        COMPOSE_TABS = ("Phiếu trình", "Văn bản", "Luồng")
         self._compose_tab_pages = {}
         self._compose_tab_widgets = {}
         self._compose_tab_enabled = {name: True for name in COMPOSE_TABS}
@@ -3319,7 +3353,6 @@ class App(tk.Tk):
 
         self._build_compose_tab_phieu_trinh(self._compose_tab_pages["Phiếu trình"])
         self._build_compose_tab_van_ban(self._compose_tab_pages["Văn bản"])
-        self._build_compose_tab_noi_nhan(self._compose_tab_pages["Nơi nhận"])
         self._build_compose_tab_luong(self._compose_tab_pages["Luồng"])
         self._show_compose_tab(COMPOSE_TABS[0])
 
@@ -3500,7 +3533,11 @@ class App(tk.Tk):
         return None
 
     def _add_document_section(self):
-        ds = DocumentSection(self.doc_sections_frame, self, self._remove_document_section)
+        # copy_recip_from = văn bản liền trước (nếu có) — DocumentSection tự hiện nút "Sao chép
+        # nơi nhận từ văn bản trên" khi có giá trị này (xem DocumentSection.__init__).
+        prev = self.doc_sections[-1] if self.doc_sections else None
+        ds = DocumentSection(self.doc_sections_frame, self, self._remove_document_section,
+                              copy_recip_from=prev)
         ds.pack(fill="x", pady=(0, 6))
         self.doc_sections.append(ds)
         self._update_doc_section_remove_buttons()
@@ -3534,17 +3571,16 @@ class App(tk.Tk):
         self._editing_report_id = None   # xoá dấu "đang sửa phiếu X" (xem _edit_in_compose)
         self._editing_report_existing_attach_ids = None
         self._cleanup_edit_tmpdirs()
-        self._set_report_mode("ban_hanh")   # về đúng mặc định, mở lại tab Văn bản/Nơi nhận
+        self._set_report_mode("ban_hanh")   # về đúng mặc định, mở lại tab Văn bản (có Nơi nhận)
         self.file_report.set("")
         self.extra_report.clear()
 
         for ds in list(self.doc_sections):
             ds.destroy()
         self.doc_sections = []
-        self._add_document_section()
+        self._add_document_section()   # văn bản đầu mới tạo — nơi nhận rỗng sẵn, không cần clear
 
         self.report_content.delete("1.0", "end")
-        self.recip.clear()
 
         self.priority.set("Khẩn")
         self.security.set("Bình thường")
@@ -3586,11 +3622,6 @@ class App(tk.Tk):
             "work_profile_id": self._profile_by_name.get(self.work_profile.get()),
             "work_profile_name": self.work_profile.get(),
             "auto_stamp": self.auto_stamp_var.get(),
-            "recv_inside": self.recip.get("inside"),
-            "recv_report": self.recip.get("report"),
-            "recv_edoc": self.recip.get("edoc"),
-            "recv_save": self.recip.get("save"),
-            "recv_know": self.recip.get("know"),
             "file_report_main": self.file_report.get(),
             "files_report_extra": self.extra_report.get(),
             # "xin ý kiến" không có văn bản riêng (xem run_pipeline) — để rỗng cho khớp thực tế,
@@ -3605,13 +3636,13 @@ class App(tk.Tk):
         từng ô. Đồng thời gắn dấu ⚠ lên đúng tab (sidebar) còn thiếu, để biết cần quay lại tab
         nào mà không phải tự dò qua cả 4 tab. Tự cập nhật định kỳ (không cần nối callback riêng
         vào từng ô/luồng/nơi nhận — đơn giản hơn, chi phí không đáng kể)."""
-        missing_by_tab = {"Phiếu trình": [], "Văn bản": [], "Nơi nhận": [], "Luồng": []}
+        missing_by_tab = {"Phiếu trình": [], "Văn bản": [], "Luồng": []}
         if not self.file_report.get():
             missing_by_tab["Phiếu trình"].append("File phiếu trình")
         if not self.report_content.get("1.0", "end-1c").strip():
             missing_by_tab["Phiếu trình"].append("Nội dung phiếu")
-        # "Trình xin ý kiến": tab Văn bản/Nơi nhận đang khoá xám (xem _set_report_mode) — không
-        # đòi hỏi field ở 2 tab đó, không có gì để điền.
+        # "Trình xin ý kiến": tab Văn bản đang khoá xám (xem _set_report_mode) — không đòi hỏi
+        # field ở tab đó, không có gì để điền.
         if self._report_mode() != "xin_y_kien":
             multi = len(self.doc_sections) > 1
             for i, ds in enumerate(self.doc_sections):
@@ -3620,8 +3651,8 @@ class App(tk.Tk):
                     missing_by_tab["Văn bản"].append(f"Trích yếu văn bản{tag}")
                 if not ds.code.get().strip():
                     missing_by_tab["Văn bản"].append(f"Số/ký hiệu{tag}")
-            if not any(self.recip.get(c) for c, _ in RecipientBox.CATS):
-                missing_by_tab["Nơi nhận"].append("Nơi nhận")
+                if not any(ds.recip.get(c) for c, _ in RecipientBox.CATS):
+                    missing_by_tab["Văn bản"].append(f"Nơi nhận{tag}")
         if not self.flow_panel.is_ready():
             missing_by_tab["Luồng"].append("chọn người ký cho luồng")
 
@@ -3998,21 +4029,39 @@ class App(tk.Tk):
         ReportDetailWindow(self, item, which, self.session)
 
     def _edit_in_compose(self, item):
-        """Nhảy sang tab "Soạn văn bản", tự điền toàn bộ thông tin + file của 1 phiếu Nháp đã
-        có (gọi từ nút "Sửa" trong ReportDetailWindow) — cho sửa/đổi file rồi bấm CHẠY như
-        bình thường để Lưu/Trình lại (xem run_pipeline/save_document/save_report_draft: đã
-        nhận report_id/_existing_pid để cập nhật đúng phiếu/văn bản cũ, không tạo mới)."""
+        """Nút "Sửa" (chỉ hiện ở phiếu Nháp) — tải + điền lại để CẬP NHẬT đúng phiếu/văn bản cũ
+        (xem _start_reuse_report/_apply_edit_data, mode="edit")."""
+        self._start_reuse_report(item, mode="edit")
+
+    def _copy_in_compose(self, item):
+        """Nút "Sao chép thành phiếu mới" (chỉ hiện ở phiếu Đang xử lý/Đã hoàn thành — 2 trạng
+        thái KHÔNG sửa/thu hồi trực tiếp được nữa) — tải + điền lại y hệt "Sửa" nhưng coi là 1
+        phiếu trình HOÀN TOÀN MỚI: không mang theo report_id/publishDocumentId cũ, nên bấm CHẠY
+        sẽ tạo phiếu + từng văn bản MỚI, không đụng/xoá gì tới phiếu gốc (xem _apply_edit_data,
+        mode="copy" — lý do tách hẳn khỏi mode "edit": nếu lỡ giữ existing_pid/existing_attach_ids
+        của phiếu gốc, run_pipeline sẽ tưởng đang SỬA và tự xoá file cũ trên server của đúng
+        phiếu đang xử lý/đã hoàn thành mà người dùng muốn giữ nguyên)."""
+        self._start_reuse_report(item, mode="copy")
+
+    def _start_reuse_report(self, item, mode):
+        """Dùng chung cho cả "Sửa" và "Sao chép thành phiếu mới" — 2 việc tải dữ liệu giống hệt
+        nhau (file phiếu trình + từng văn bản + nơi nhận riêng từng văn bản + luồng/người ký đã
+        dùng, best-effort), chỉ khác đúng 1 chỗ ở _apply_edit_data: mode "edit" giữ report_id/
+        existing_pid để CẬP NHẬT đúng phiếu/văn bản cũ; mode "copy" bỏ hẳn các ID đó để tạo mới
+        hoàn toàn, không đụng tới phiếu gốc."""
+        verb = "sửa" if mode == "edit" else "sao chép"
         has_data = bool(self.file_report.get().strip() or self.doc_sections[0].file_draft.get().strip())
         if has_data and not messagebox.askyesno(
-                "Sửa phiếu trình",
-                "Form \"Soạn văn bản\" đang có dữ liệu chưa lưu — chuyển sang sửa phiếu này sẽ "
-                "xoá hết dữ liệu đang nhập. Tiếp tục?"):
+                "Sửa phiếu trình" if mode == "edit" else "Sao chép phiếu trình",
+                f"Form \"Soạn văn bản\" đang có dữ liệu chưa lưu — chuyển sang {verb} phiếu này "
+                "sẽ xoá hết dữ liệu đang nhập. Tiếp tục?"):
             return
         self._reset_form()
         self._notebook.select(self._compose_tab)
         report_id = item.get("reportId")
-        self._editing_report_id = report_id
-        self.log(f"— Đang tải dữ liệu phiếu #{report_id} để sửa… —")
+        if mode == "edit":
+            self._editing_report_id = report_id
+        self.log(f"— Đang tải dữ liệu phiếu #{report_id} để {verb}… —")
 
         s = self.session
         tmpdir = tempfile.mkdtemp(prefix="voffice_edit_")
@@ -4021,7 +4070,7 @@ class App(tk.Tk):
         # Toàn bộ việc tải (file phiếu trình + từng văn bản) có thể mất vài giây tới vài chục
         # giây tuỳ số file — hiện cửa sổ chờ nhỏ (giống lúc chuyển .docx->PDF, xem _run) để
         # người dùng biết đang có việc chạy ngầm, không phải chương trình treo/không phản hồi.
-        dlg = _ConvertingDialog(self, f"Đang tải dữ liệu phiếu #{report_id} để sửa…")
+        dlg = _ConvertingDialog(self, f"Đang tải dữ liệu phiếu #{report_id} để {verb}…")
 
         def worker():
             result = {"report_local": None, "extra_locals": [], "docs": [], "report_existing_attach_ids": [],
@@ -4135,20 +4184,24 @@ class App(tk.Tk):
             result["flow_nodes"] = fetch_report_flow_nodes(s, report_id, flow_opt["id"], self.log) \
                 if flow_opt else []
 
-            self.after(0, lambda: (dlg.close(), self._apply_edit_data(item, result)))
+            self.after(0, lambda: (dlg.close(), self._apply_edit_data(item, result, mode)))
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_edit_data(self, item, result):
+    def _apply_edit_data(self, item, result, mode="edit"):
         # Tự tích lại đúng checkbox loại phiếu trình TRƯỚC khi điền dữ liệu — nếu là "xin ý
-        # kiến", tab "Văn bản"/"Nơi nhận" khoá xám ngay từ đây nên các bước điền doc_sections/
-        # nơi nhận bên dưới coi như vô hại (widget vẫn được điền nhưng ẩn sau tab đã khoá), và
-        # câu nhảy tab cuối hàm sẽ tự về "Phiếu trình" thay vì "Văn bản" (xem _show_compose_tab).
+        # kiến", tab "Văn bản" khoá xám ngay từ đây nên các bước điền doc_sections/nơi nhận bên
+        # dưới coi như vô hại (widget vẫn được điền nhưng ẩn sau tab đã khoá), và câu nhảy tab
+        # cuối hàm sẽ tự về "Phiếu trình" thay vì "Văn bản" (xem _show_compose_tab).
         self._set_report_mode(result.get("report_mode", "ban_hanh"))
         if result["report_local"]:
             self.file_report.set(result["report_local"])
         for p in result["extra_locals"]:
             self.extra_report.add_path(p)
-        self._editing_report_existing_attach_ids = result.get("report_existing_attach_ids") or []
+        # CHỈ giữ ID file cũ của phiếu trình khi thật sự SỬA (để run_pipeline xoá trước khi ghi
+        # đè) — mode "copy" luôn bỏ trống, phiếu mới không có gì "cũ" để xoá, và tuyệt đối không
+        # được đụng tới file của phiếu gốc (xem docstring _copy_in_compose).
+        self._editing_report_existing_attach_ids = \
+            (result.get("report_existing_attach_ids") or []) if mode == "edit" else []
 
         self.report_content.delete("1.0", "end")
         self.report_content.insert("1.0", item.get("content") or "")
@@ -4166,8 +4219,17 @@ class App(tk.Tk):
                 ds.file_draft.set(doc["local_file"])
             for p in doc.get("extra_locals") or []:
                 ds.extra.add_path(p)
-            ds._existing_pid = doc.get("existing_pid")
-            ds._existing_attach_ids = doc.get("existing_attach_ids") or []
+            # CHỈ mang theo existing_pid/existing_attach_ids khi thật sự SỬA — mode "copy" luôn
+            # để None/[] (mặc định của DocumentSection mới) dù `doc` (tải từ phiếu gốc) CÓ sẵn
+            # 2 giá trị này, để buộc save_document() tạo văn bản MỚI (onInsertDraft rỗng
+            # publishDocumentId) thay vì tưởng đang sửa văn bản cũ rồi xoá mất file gốc.
+            if mode == "edit":
+                ds._existing_pid = doc.get("existing_pid")
+                ds._existing_attach_ids = doc.get("existing_attach_ids") or []
+            # Nơi nhận là field CỦA TỪNG văn bản (receive_*) — điền thẳng vào ĐÚNG ds của văn
+            # bản đó, không còn gộp (union) vào 1 rổ chung như trước (xem thảo luận HAR
+            # "2 văn bản 2 nơi nhận trong cùng tờ trình").
+            self._fill_recipients_best_effort(ds, doc)
 
         first = docs[0]
         if first.get("priority"):
@@ -4178,24 +4240,20 @@ class App(tk.Tk):
             if fid == item.get("fileId"):
                 self.work_profile.set(name); break
 
-        # Nơi nhận là field CỦA TỪNG văn bản (receive_*) — gộp (union) từ TẤT CẢ văn bản trong
-        # phiếu, không chỉ văn bản đầu, nếu không nơi nhận riêng của văn bản 2 trở đi bị bỏ sót.
-        for d in docs:
-            self._fill_recipients_best_effort(d)
-
         flow_restored = self._apply_flow_restore(
             result.get("flow"), result.get("flow_profile"), result.get("flow_nodes") or [])
 
-        flow_note = ("đã tự khôi phục ĐÚNG luồng + người ký của lần trình trước khi thu hồi"
+        flow_note = ("đã tự khôi phục ĐÚNG luồng + người ký của lần trình gần nhất"
                      if flow_restored else
                      "Luồng trình/Người ký KHÔNG tự chọn lại được — tự chọn lại")
+        copy_note = " Đây LÀ PHIẾU MỚI HOÀN TOÀN — bấm CHẠY sẽ không đụng gì tới phiếu gốc." \
+            if mode == "copy" else ""
         self.log(f"— Đã điền xong dữ liệu phiếu #{item.get('reportId')} — {flow_note}. "
-                  "Kiểm tra lại rồi bấm CHẠY. —")
+                  f"Kiểm tra lại rồi bấm CHẠY.{copy_note} —")
         self._refresh_readiness()
-        # Dữ liệu vừa tự điền nằm rải trên nhiều tab (Văn bản/Nơi nhận) — với giao diện 4 tab
-        # mới, nếu không tự nhảy sang, người dùng đang đứng ở tab khác (vd "Phiếu trình") sẽ
-        # tưởng nhầm là chưa điền được gì. Nhảy sang "Văn bản" trước (file/nội dung cần soát kỹ
-        # nhất trước khi bấm CHẠY) — "Nơi nhận" xem badge cảnh báo trên sidebar để biết cần ghé qua.
+        # Dữ liệu vừa tự điền nằm rải trên nhiều tab — nếu không tự nhảy sang, người dùng đang
+        # đứng ở tab khác (vd "Phiếu trình") sẽ tưởng nhầm là chưa điền được gì. Nhảy sang
+        # "Văn bản" (file/nội dung/nơi nhận của từng văn bản cần soát kỹ nhất trước khi bấm CHẠY).
         self._show_compose_tab("Văn bản")
 
     def _apply_flow_restore(self, flow_opt, profile_opt, flow_nodes):
@@ -4217,10 +4275,10 @@ class App(tk.Tk):
             self.work_profile.set(profile_opt["name"])
         return True
 
-    def _fill_recipients_best_effort(self, doc):
-        """Điền lại Nơi nhận từ TÊN (không có ID) bằng khớp gần nhất trong cây đơn vị — best
-        effort, giống triết lý "tự điền chỉ để đỡ gõ tay" đã ghi trong HUONG_DAN.md. Luôn tự
-        kiểm tra lại trước khi bấm CHẠY."""
+    def _fill_recipients_best_effort(self, ds, doc):
+        """Điền lại Nơi nhận của ĐÚNG văn bản `ds` từ TÊN (không có ID) bằng khớp gần nhất trong
+        cây đơn vị — best effort, giống triết lý "tự điền chỉ để đỡ gõ tay" đã ghi trong
+        HUONG_DAN.md. Luôn tự kiểm tra lại trước khi bấm CHẠY."""
         cat_field_tree = [
             ("inside", "receive_inside", CAY["internal"]["nodes"]),
             ("report", "receive_report", CAY["internal"]["nodes"]),
@@ -4234,11 +4292,11 @@ class App(tk.Tk):
                 matches = search_nodes(name, nodes, self.store, k=1)
                 if matches:
                     nd = matches[0]
-                    if not any(_node_key(x) == _node_key(nd) for x in self.recip.buckets[cat]):
-                        self.recip.buckets[cat].append(nd)
+                    if not any(_node_key(x) == _node_key(nd) for x in ds.recip.buckets[cat]):
+                        ds.recip.buckets[cat].append(nd)
                 else:
                     self.log(f"   • Không khớp được nơi nhận '{name}' trong cây đơn vị — tự thêm tay.")
-        self.recip._render_chips()
+        ds.recip._render_chips()
 
     def _ask_captcha(self, path):
         try:
@@ -4337,6 +4395,11 @@ class ReportDetailWindow(tk.Toplevel):
             self.btn_cancel.pack(side="left")
         if which == "draft":
             ttk.Button(top, text="Sửa", command=self._edit_in_compose).pack(side="left")
+        if which in ("processing", "processed"):
+            # "Đang xử lý"/"Đã hoàn thành" không Sửa/Thu hồi trực tiếp được nữa (nhiều phiếu đã
+            # đi quá bước không thu hồi nổi) — cho tạo 1 phiếu MỚI mang theo toàn bộ nội dung cũ
+            # để trình lại, thay vì phải gõ/chọn file lại từ đầu (xem App._copy_in_compose).
+            ttk.Button(top, text="Sao chép thành phiếu mới", command=self._copy_to_compose).pack(side="left")
         ttk.Button(top, text="Đóng", command=self.destroy).pack(side="left", padx=6)
         ttk.Button(top, text="Tải toàn bộ tài liệu",
                    command=self._download_all_attachs).pack(side="left", padx=(6, 0))
@@ -4659,6 +4722,10 @@ class ReportDetailWindow(tk.Toplevel):
         self.master._edit_in_compose(self.item)
         self.destroy()
 
+    def _copy_to_compose(self):
+        self.master._copy_in_compose(self.item)
+        self.destroy()
+
 
 class PreviewWindow(tk.Toplevel):
     """Xem lại thông tin + file đã chuẩn bị trước khi gửi thật.
@@ -4802,12 +4869,16 @@ class PreviewWindow(tk.Toplevel):
             ttk.Label(r, text=val or "(trống)", wraplength=200, justify="left").pack(
                 side="left", fill="x", expand=True)
 
+        # Nơi nhận là field của TỪNG văn bản (xem DocumentSection) — hiện ngay dưới mỗi văn bản,
+        # không còn 1 khối "Nơi nhận" chung cho cả phiếu như trước.
+        recv_cats = [("recv_inside", "Nhận nội bộ"), ("recv_report", "Báo cáo"),
+                     ("recv_edoc", "Liên thông"), ("recv_save", "Nơi lưu"), ("recv_know", "Để biết")]
         documents = self.cfg.get("documents") or []
         if documents:
             docs_frame = ttk.LabelFrame(parent, text=f"Văn bản ({len(documents)})", padding=8)
             docs_frame.pack(fill="x", pady=(0, 8))
             for i, doc in enumerate(documents):
-                r = ttk.Frame(docs_frame); r.pack(fill="x", anchor="w", pady=(0 if i == 0 else 6, 0))
+                r = ttk.Frame(docs_frame); r.pack(fill="x", anchor="w", pady=(0 if i == 0 else 8, 0))
                 summary = f"{doc.get('doc_type') or '(chưa chọn loại)'} — {doc.get('code') or '(chưa có số)'}"
                 ttk.Label(r, text=f"VB {i+1}:", width=13, foreground="gray").pack(side="left", anchor="n")
                 ttk.Label(r, text=summary, wraplength=200, justify="left").pack(
@@ -4817,22 +4888,15 @@ class PreviewWindow(tk.Toplevel):
                     ttk.Label(r2, text="", width=13).pack(side="left")
                     ttk.Label(r2, text=doc["abstract"], wraplength=200, justify="left",
                               foreground="#444").pack(side="left", fill="x", expand=True)
-
-        cats = [("recv_inside", "Nhận nội bộ"), ("recv_report", "Báo cáo"), ("recv_edoc", "Liên thông"),
-                ("recv_save", "Nơi lưu"), ("recv_know", "Để biết")]
-        any_recv = any(self.cfg.get(k) for k, _ in cats)
-        if any_recv:
-            rec = ttk.LabelFrame(parent, text="Nơi nhận", padding=8)
-            rec.pack(fill="x", pady=(0, 8))
-            for key, label in cats:
-                nodes = self.cfg.get(key) or []
-                if not nodes:
-                    continue
-                names = ", ".join(nd["name"].strip() for nd in nodes)
-                r = ttk.Frame(rec); r.pack(fill="x", anchor="w", pady=1)
-                ttk.Label(r, text=label + ":", width=13, foreground="gray").pack(side="left", anchor="n")
-                ttk.Label(r, text=names, wraplength=200, justify="left").pack(
-                    side="left", fill="x", expand=True)
+                for key, label in recv_cats:
+                    nodes = doc.get(key) or []
+                    if not nodes:
+                        continue
+                    names = ", ".join(nd["name"].strip() for nd in nodes)
+                    r3 = ttk.Frame(docs_frame); r3.pack(fill="x", anchor="w", pady=1)
+                    ttk.Label(r3, text=f"  {label}:", width=13, foreground="gray").pack(side="left", anchor="n")
+                    ttk.Label(r3, text=names, wraplength=200, justify="left").pack(
+                        side="left", fill="x", expand=True)
 
     def _build_tree(self, parent, cfg):
         box = ttk.LabelFrame(parent, text="File", padding=4)
