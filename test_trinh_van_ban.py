@@ -503,5 +503,62 @@ class TestFetchIncomingDocComments(unittest.TestCase):
         self.assertTrue(items and "commentText" in items[0] and "userName" in items[0])
 
 
+# ==================== Chạy ngầm dưới khay (Windows) — phần thuần, chạy được trên mọi HĐH ====================
+class TestTrayHelpers(unittest.TestCase):
+    def test_launch_command_co_co_tray_va_dat_trong_ngoac_kep(self):
+        cmd = tvb._tray_launch_command()
+        self.assertIn("--tray", cmd)
+        self.assertTrue(cmd.strip().startswith('"'))   # đường dẫn exe/python luôn bọc "..."
+
+    def test_autostart_no_op_ngoai_windows(self):
+        if tvb.IS_WINDOWS:
+            self.skipTest("chạy trên Windows — set_autostart có tác dụng thật")
+        self.assertFalse(tvb.autostart_enabled())
+        self.assertFalse(tvb.set_autostart(True))
+        self.assertFalse(tvb.set_autostart(False))
+
+    def test_single_instance_guard_ban_dau_ok_ban_hai_bi_chan(self):
+        import threading, socket
+        # Dùng 1 cổng trống ngẫu nhiên thay cho SINGLE_INSTANCE_PORT thật (máy CI/dev có thể
+        # đang chiếm đúng cổng đó bởi tiến trình khác — không liên quan tới thứ đang kiểm thử).
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+        probe.close()
+        orig_port = tvb.SINGLE_INSTANCE_PORT
+        tvb.SINGLE_INSTANCE_PORT = free_port
+        self.addCleanup(setattr, tvb, "SINGLE_INSTANCE_PORT", orig_port)
+
+        srv, first = tvb.single_instance_guard()
+        self.assertTrue(first)
+        self.assertIsNotNone(srv)
+        try:
+            def responder():
+                srv.setblocking(True)
+                srv.settimeout(2.0)
+                try:
+                    c, _ = srv.accept()
+                    c.recv(64)
+                    c.sendall(tvb.SINGLE_INSTANCE_MAGIC)
+                    c.close()
+                except OSError:
+                    pass
+            t = threading.Thread(target=responder, daemon=True)
+            t.start()
+            srv2, first2 = tvb.single_instance_guard()
+            t.join(timeout=3)
+            self.assertIsNone(srv2)
+            self.assertFalse(first2)
+        finally:
+            srv.close()
+
+    def test_make_tray_image_dung_kich_thuoc(self):
+        try:
+            img = tvb.make_tray_image(40)
+        except ImportError:
+            self.skipTest("thiếu Pillow trên máy đang chạy")
+        self.assertEqual(img.size, (40, 40))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

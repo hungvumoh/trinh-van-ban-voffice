@@ -3,6 +3,7 @@
 ## Chuẩn bị (làm 1 lần)
 1. Cài Python 3.9+ (tick "Add to PATH" khi cài trên Windows).
 2. Mở Terminal/CMD, chạy: `pip install requests pypdf pymupdf keyring`
+   - Windows, muốn dùng "chạy ngầm khi bật máy" (xem cuối file): thêm `pip install pystray pillow`
 3. Để **các file dữ liệu cùng một thư mục** với `trinh_van_ban.py` (`du_lieu.json`, `noi_nhan.json`, `cay_don_vi.json`, `luong_trinh.json`).
 
 ## Chạy
@@ -94,6 +95,37 @@ tuỳ nút đã bấm.
   Dữ liệu ghim/tần suất + quy tắc tự nhận luồng theo ký hiệu văn bản lưu trong `luong_trinh.json`
   (sổ RIÊNG của máy đang chạy — máy khác cài chương trình này sẽ có sổ trống, tự học lại từ đầu).
 - Muốn thêm nơi nhận chưa có trong sổ: mở `noi_nhan.json`, thêm dòng `"Tên đơn vị": "ID"`.
+
+## Chạy ngầm khi bật máy (chỉ Windows)
+
+Mục đích: bật máy lên là chương trình tự đăng nhập sẵn, nằm im dưới **khay hệ thống** (góc phải
+thanh taskbar, cạnh đồng hồ — Windows tự dồn vào nút mũi tên `^`). Bấm icon là mở ra ngay,
+không phải chờ đăng nhập lại.
+
+**Cài lần đầu:**
+1. Mở chương trình bình thường, đăng nhập, **tick "Nhớ đăng nhập"** (mật khẩu lưu trong
+   Windows Credential Manager, không ra file).
+2. Trên thanh trên cùng, tick **"Khởi động cùng Windows"**.
+
+Từ lần bật máy sau: chương trình tự chạy ẩn (`--tray`), tự đăng nhập, hiện balloon "Đã sẵn sàng".
+
+**Dùng:**
+- **Bấm (đúp) icon khay** hoặc chuột phải → *Mở*: hiện cửa sổ chính.
+- Bấm **✕** trên cửa sổ: chỉ thu xuống khay, chương trình **vẫn chạy**.
+- Chuột phải icon khay: *Mở* · *Đăng nhập lại* · *Khởi động cùng Windows* (bật/tắt) · **Thoát**
+  (thoát hẳn).
+- Mở lần thứ 2 (tự bấm shortcut trong khi đã có bản chạy): không mở thêm bản mới, chỉ bật cửa
+  sổ bản đang chạy lên.
+
+**Giữ phiên:** chạy nhiều ngày liền thì phiên VOffice sẽ hết hạn — chương trình cứ ~25 phút tự
+kiểm tra, rớt thì tự đăng nhập lại bằng mật khẩu đã lưu.
+
+**Tắt hẳn tính năng:** bỏ tick "Khởi động cùng Windows" (hoặc menu khay → bỏ tick).
+
+**Cần thư viện:** `pip install pystray pillow` (bản đóng gói .exe đã kèm sẵn). Thiếu 2 thư viện
+này thì `--tray` tự chuyển về mở cửa sổ bình thường.
+
+> macOS: chưa có. Cờ `--tray` trên mac chỉ mở cửa sổ như thường.
 
 ## Khi gặp lỗi / muốn góp ý cải tiến
 Chương trình tự ghi log ra file **`app_log.txt`** (cùng thư mục với `settings.json`/`nguoi_dung.json`) —

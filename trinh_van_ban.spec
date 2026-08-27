@@ -7,7 +7,13 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    # pystray/Pillow: chỉ dùng ở chế độ "chạy ngầm dưới khay" trên Windows. pystray nạp backend
+    # theo tên lúc chạy nên phải khai báo tường minh cho PyInstaller. Trên macOS bỏ qua (import
+    # lazy — thiếu 2 lib này chương trình vẫn chạy).
+    hiddenimports=(
+        ['pystray._win32', 'PIL.Image', 'PIL.ImageDraw', 'PIL.ImageFont']
+        if sys.platform == 'win32' else []
+    ),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -1628,6 +1628,102 @@ def load_password(username):
             return None
     return None
 
+# ================= WINDOWS: TỰ KHỞI ĐỘNG CÙNG MÁY + ICON KHAY HỆ THỐNG =================
+# Chỉ có tác dụng trên Windows (bọc IS_WINDOWS). Chế độ "chạy ngầm" (--tray): bật máy →
+# tự đăng nhập bằng mật khẩu đã lưu trong Windows Credential Manager → KHÔNG hiện cửa sổ,
+# chỉ có 1 icon dưới khay; bấm icon mới mở cửa sổ ra. Không có thông báo/poll gì (phương án A).
+IS_WINDOWS = sys.platform == "win32"
+SINGLE_INSTANCE_PORT = 50573   # cổng localhost cố định: chống chạy 2 bản + ra lệnh "hiện cửa sổ"
+SINGLE_INSTANCE_MAGIC = b"TVB-OK\n"
+_AUTOSTART_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_AUTOSTART_VALUE_NAME = "TroLyTrinhVanBan"
+
+def _tray_launch_command():
+    """Lệnh đăng ký vào HKCU\\...\\Run: '<exe>' --tray khi đã đóng gói (PyInstaller), hoặc
+    'pythonw.exe <script> --tray' khi chạy từ mã nguồn (pythonw = không hiện cửa sổ console)."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --tray'
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    exe = pyw if os.path.exists(pyw) else sys.executable
+    return f'"{exe}" "{os.path.abspath(__file__)}" --tray'
+
+def autostart_enabled():
+    if not IS_WINDOWS:
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_RUN_KEY) as k:
+            val, _ = winreg.QueryValueEx(k, _AUTOSTART_VALUE_NAME)
+            return bool(val)
+    except OSError:
+        return False
+
+def set_autostart(enable):
+    """Bật/tắt tự khởi động cùng Windows (ghi/xoá value ở HKCU\\...\\Run — không cần quyền
+    admin). Trả True nếu thao tác Registry thành công."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_RUN_KEY) as k:
+            if enable:
+                winreg.SetValueEx(k, _AUTOSTART_VALUE_NAME, 0, winreg.REG_SZ, _tray_launch_command())
+            else:
+                try:
+                    winreg.DeleteValue(k, _AUTOSTART_VALUE_NAME)
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError as e:
+        _file_logger.error(f"set_autostart({enable}) lỗi Registry: {e!r}")
+        return False
+
+def single_instance_guard():
+    """Giữ 1 socket localhost cố định để chỉ cho phép 1 bản chạy.
+    Trả (server_socket, True) nếu đây là bản ĐẦU TIÊN;
+    Trả (None, False) nếu đã có bản khác của CHÍNH chương trình này đang chạy (và đã gửi lệnh
+    'hiện cửa sổ' cho nó — bản mới nên thoát êm);
+    Trả (None, True) nếu cổng bị 1 app lạ chiếm — vẫn chạy tiếp, chỉ mất khoá 1-bản."""
+    import socket
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        srv.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+    except OSError:
+        srv.close()
+        try:
+            c = socket.create_connection(("127.0.0.1", SINGLE_INSTANCE_PORT), timeout=2)
+            c.sendall(b"SHOW\n")
+            reply = c.recv(16)
+            c.close()
+            if reply.strip() == SINGLE_INSTANCE_MAGIC.strip():
+                return None, False
+        except OSError:
+            pass
+        _file_logger.error(f"Cổng {SINGLE_INSTANCE_PORT} bị app khác chiếm — chạy không có khoá 1-bản.")
+        return None, True
+    srv.listen(5)
+    srv.setblocking(False)
+    return srv, True
+
+def make_tray_image(size=64):
+    """Sinh ảnh icon khay lúc chạy (ô bo góc xanh + chữ 'VB') — khỏi cần file .ico kèm theo,
+    khỏi vướng bản quyền. Cần Pillow; ném ImportError nếu thiếu để nơi gọi tự xử lý."""
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([2, 2, size - 3, size - 3], radius=size // 5, fill=(25, 118, 210, 255))
+    font = None
+    for name in ("segoeuib.ttf", "segoeui.ttf", "arialbd.ttf", "Arial.ttf"):
+        try:
+            font = ImageFont.truetype(name, int(size * 0.42)); break
+        except OSError:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    l, t, r, b = d.textbbox((0, 0), "VB", font=font)
+    d.text(((size - (r - l)) / 2 - l, (size - (b - t)) / 2 - t), "VB", font=font, fill="white")
+    return img
+
 def load_store():
     try:
         with open(STORE_FILE, encoding="utf-8") as f:
@@ -3020,7 +3116,7 @@ class SendLogWindow(tk.Toplevel):
 
 
 class App(tk.Tk):
-    def __init__(self):
+    def __init__(self, tray_mode=False, instance_sock=None):
         super().__init__()
         self.title("Trợ lý trình văn bản")
         self.session = None
@@ -3031,9 +3127,22 @@ class App(tk.Tk):
         self.doc_sections = []
         self._edit_tmpdirs = []   # thư mục tạm chứa file tải về khi "Sửa" — dọn ở _reset_form()/thoát
         self._readiness_after_id = None   # id lịch self.after() của _refresh_readiness — xem _cancel_readiness_loop
+        # Chế độ chạy ngầm dưới khay — chỉ thật sự bật trên Windows (mac/linux: coi như chạy
+        # thường, xem thảo luận "bản cho windows").
+        self.tray_mode = bool(tray_mode) and IS_WINDOWS
+        self._instance_sock = instance_sock
+        self._tray_icon = None
+        self._keepalive_id = None
         atexit.register(self._cleanup_edit_tmpdirs)
         self.container = ttk.Frame(self); self.container.pack(fill="both", expand=True)
-        self._show_login()
+        # Bấm ✕ ở cửa sổ chính: chế độ khay thì THU XUỐNG KHAY thay vì thoát hẳn.
+        self.protocol("WM_DELETE_WINDOW", self._on_root_close)
+        self._start_instance_listener()
+        if self.tray_mode:
+            self.withdraw()
+            self.after(0, self._boot_tray)
+        else:
+            self._show_login()
 
     def report_callback_exception(self, exc_type, exc_value, exc_tb):
         """Tkinter tự gọi hàm này cho MỌI lỗi xảy ra trong callback GUI (bấm nút, gõ phím...) —
@@ -3152,6 +3261,8 @@ class App(tk.Tk):
                 pass
         save_settings(self.settings)
         self._show_main()   # thành công → mở giao diện chính
+        if self.tray_mode:
+            self._schedule_keepalive()   # đăng nhập tay trong chế độ khay — vẫn giữ phiên sống ngầm
 
     def _do_logout(self):
         """Đăng xuất — chỉ bỏ session đang dùng trên máy (KHÔNG gọi gì lên server, chưa xác nhận
@@ -3162,6 +3273,224 @@ class App(tk.Tk):
         self.session = None
         self._logged_user = None
         self._show_login(auto=False)   # auto=False: không tự nhảy lại vào ngay tài khoản vừa thoát
+
+    # ========== CHẠY NGẦM DƯỚI KHAY (Windows) ==========
+    KEEPALIVE_MS = 25 * 60 * 1000   # 25 phút — ping rẻ giữ cookie sống, rớt phiên thì tự login lại
+
+    def _boot_tray(self):
+        """Vào từ --tray: dựng icon khay, thử đăng nhập nền bằng mật khẩu đã lưu. Không có mật
+        khẩu / login hỏng → hiện màn đăng nhập cho người dùng làm tay."""
+        self._install_tray()
+        if not self.tray_mode:
+            return   # pystray không nạp được — _install_tray đã hạ cờ + hiện màn đăng nhập
+        user = self.settings.get("username", "")
+        pw = load_password(user) if (user and self.settings.get("remember")) else None
+        if not pw:
+            self._tray_notify("Chưa lưu mật khẩu",
+                              "Mở chương trình, đăng nhập và tick 'Nhớ đăng nhập' để lần sau tự vào.")
+            self._show_login(auto=False)
+            self._do_tray_show()
+            return
+        self._tray_notify("Đang đăng nhập nền…", f"Tài khoản {user}")
+        threading.Thread(target=self._silent_login, args=(user, pw), daemon=True).start()
+
+    def _silent_login(self, user, pw):
+        s = make_session()
+        try:
+            cas_login(s, user, pw, lambda m: _file_logger.info("[tray-login] " + m), lambda _p: None)
+        except Exception as e:
+            _file_logger.error(f"[tray-login] hỏng: {e!r}")
+            self.after(0, lambda: (self._tray_notify(
+                "Đăng nhập nền không thành công", "Mở chương trình để đăng nhập thủ công."),
+                self._show_login(auto=False), self._do_tray_show()))
+            return
+        self.session = s
+        self._logged_user = user
+        self.after(0, self._after_silent_login)
+
+    def _after_silent_login(self):
+        self._show_main()      # dựng giao diện nhưng KHÔNG deiconify — vẫn nằm im dưới khay
+        self._schedule_keepalive()
+        if self.tray_mode and self._tray_icon is not None:
+            self.withdraw()
+            self._tray_notify("Đã sẵn sàng", f"Đã đăng nhập {self._logged_user}. Bấm icon khay để mở.")
+        else:
+            self._do_tray_show()   # không có khay để quay lại — cứ hiện cửa sổ ra
+
+    def _install_tray(self):
+        try:
+            import pystray
+        except Exception as e:
+            _file_logger.error(f"Không nạp được pystray ({e!r}) — chạy: pip install pystray pillow")
+            self.tray_mode = False
+            self._show_login(auto=False)
+            self._do_tray_show()
+            return
+        try:
+            image = make_tray_image()
+        except Exception as e:
+            _file_logger.error(f"Không tạo được icon khay ({e!r})")
+            from PIL import Image
+            image = Image.new("RGBA", (64, 64), (25, 118, 210, 255))
+        Item = pystray.MenuItem
+        menu = pystray.Menu(
+            Item("Mở", self._tray_show, default=True),
+            Item("Đăng nhập lại", self._tray_relogin),
+            Item("Khởi động cùng Windows", self._tray_toggle_autostart,
+                 checked=lambda _i: autostart_enabled()),
+            Item("Thoát", self._tray_quit),
+        )
+        self._tray_icon = pystray.Icon("trinh_van_ban", image, "Trợ lý trình văn bản", menu)
+        # icon.run() chặn luồng gọi nó — trên Windows chạy được ở thread nền thoải mái.
+        threading.Thread(target=self._tray_icon.run, daemon=True).start()
+
+    # Các callback dưới đây chạy TRONG luồng của pystray → mọi đụng chạm Tk phải đẩy qua after().
+    def _tray_show(self, *_):
+        self.after(0, self._do_tray_show)
+
+    def _do_tray_show(self):
+        try:
+            self.deiconify(); self.state("normal"); self.lift(); self.focus_force()
+        except tk.TclError:
+            pass
+
+    def _tray_quit(self, *_):
+        self.after(0, self._real_quit)
+
+    def _tray_relogin(self, *_):
+        user = self.settings.get("username", "")
+        pw = load_password(user) if self.settings.get("remember") else None
+        if not pw:
+            self.after(0, lambda: (self._show_login(auto=False), self._do_tray_show()))
+            return
+        threading.Thread(target=self._keepalive_relogin, args=(user, pw, True), daemon=True).start()
+
+    def _tray_toggle_autostart(self, *_):
+        enable = not autostart_enabled()
+        if not set_autostart(enable):
+            self._tray_notify("Không đổi được", "Không ghi được vào Registry HKCU\\...\\Run.")
+
+    def _tray_notify(self, title, msg):
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.notify(msg, title); return
+            except Exception:
+                pass
+        _file_logger.info(f"[notify] {title}: {msg}")
+
+    def _on_root_close(self):
+        """✕ ở cửa sổ chính. Chế độ khay → chỉ ẩn đi (chương trình vẫn chạy). Ngược lại → thoát."""
+        if self.tray_mode and self._tray_icon is not None:
+            self.withdraw()
+            self._tray_notify("Vẫn đang chạy",
+                              "Đã thu xuống khay. Thoát hẳn: chuột phải icon khay → Thoát.")
+        else:
+            self._real_quit()
+
+    def _real_quit(self):
+        self._cancel_keepalive()
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
+        try:
+            if self._instance_sock is not None:
+                self._instance_sock.close()
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
+    def _start_instance_listener(self):
+        """Poll socket 1-bản: bản thứ 2 kết nối tới sẽ khiến bản này hiện cửa sổ lên."""
+        if self._instance_sock is None:
+            return
+        self._poll_instance_sock()
+
+    def _poll_instance_sock(self):
+        try:
+            conn, _ = self._instance_sock.accept()
+        except (BlockingIOError, OSError):
+            conn = None
+        except Exception:
+            conn = None
+        if conn is not None:
+            try:
+                conn.recv(64)
+                conn.sendall(SINGLE_INSTANCE_MAGIC)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+            self._do_tray_show()
+        self.after(600, self._poll_instance_sock)
+
+    def _schedule_keepalive(self):
+        self._cancel_keepalive()
+        self._keepalive_id = self.after(self.KEEPALIVE_MS, self._keepalive_tick)
+
+    def _cancel_keepalive(self):
+        if self._keepalive_id is not None:
+            try:
+                self.after_cancel(self._keepalive_id)
+            except tk.TclError:
+                pass
+            self._keepalive_id = None
+
+    def _keepalive_tick(self):
+        """Chạy nền lâu (nhiều ngày) → cookie VOffice sẽ hết hạn. Ping rẻ; rớt phiên thì tự
+        đăng nhập lại bằng creds đã lưu — KHÔNG cần bọc từng request trong ứng dụng."""
+        s = self.session
+        if s is None:
+            self._schedule_keepalive(); return
+
+        def worker():
+            alive = False
+            try:
+                r = s.post(BASE + "/notice!getTop.do", data={"dojo.preventCache": now_ms()}, timeout=20)
+                alive = (r.status_code == 200 and not _is_login_page(r.text))
+            except Exception:
+                alive = False
+            if not alive:
+                _file_logger.info("[keepalive] phiên có vẻ đã hết hạn — thử đăng nhập lại…")
+                user = self.settings.get("username", "")
+                pw = load_password(user) if self.settings.get("remember") else None
+                if pw:
+                    self._keepalive_relogin(user, pw, False)
+            self.after(0, self._schedule_keepalive)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _keepalive_relogin(self, user, pw, notify):
+        try:
+            s = make_session()
+            cas_login(s, user, pw, lambda m: _file_logger.info("[relogin] " + m), lambda _p: None)
+        except Exception as e:
+            _file_logger.error(f"[relogin] hỏng: {e!r}")
+            if notify:
+                self.after(0, lambda: self._tray_notify("Đăng nhập lại hỏng", repr(e)))
+            return
+        self.session = s
+        self._logged_user = user
+        _file_logger.info("[relogin] đã có phiên mới.")
+        if notify:
+            self.after(0, lambda: self._tray_notify("Đã đăng nhập lại", "Phiên mới đã sẵn sàng."))
+
+    def _toggle_autostart_from_ui(self):
+        want = self._autostart_var.get()
+        if not set_autostart(want):
+            messagebox.showwarning("Không đổi được",
+                                    "Không ghi được vào Registry (HKCU\\...\\Run).")
+            self._autostart_var.set(autostart_enabled())
+            return
+        if want and not self.tray_mode:
+            messagebox.showinfo(
+                "Đã bật", "Lần bật máy tới, chương trình sẽ tự chạy ẩn dưới khay hệ thống. "
+                "Bấm icon khay để mở.")
 
     def _open_voffice_web(self):
         """Mở trình duyệt tới màn hình "Quản lý phiếu trình" trên chính hệ thống VOffice (không
@@ -3399,6 +3728,10 @@ class App(tk.Tk):
                   foreground="#2e7d32", font=("", 9, "bold")).pack(side="left")
         ttk.Button(topbar, text="Đăng xuất", command=self._do_logout).pack(side="right")
         ttk.Button(topbar, text="Mở VOffice", command=self._open_voffice_web).pack(side="right", padx=(0, 6))
+        if IS_WINDOWS:
+            self._autostart_var = tk.BooleanVar(value=autostart_enabled())
+            ttk.Checkbutton(topbar, text="Khởi động cùng Windows", variable=self._autostart_var,
+                            command=self._toggle_autostart_from_ui).pack(side="right", padx=(0, 12))
 
         notebook = ttk.Notebook(self.container)
         notebook.pack(fill="both", expand=True)
@@ -4077,13 +4410,18 @@ class App(tk.Tk):
         # dùng chung 1 cửa sổ chờ, đóng lại khi cả 3 đã xong (kể cả cái nào lỗi cũng tính là
         # "xong" — không treo cửa sổ chờ mãi chỉ vì 1 danh sách tải hỏng).
         total = len(self.MGMT_TABS)
-        dlg = _ConvertingDialog(self, f"Đang tải danh sách phiếu trình (0/{total})…")
+        # Lúc khởi động ngầm dưới khay (cửa sổ chính đang ẩn), KHÔNG bật cửa sổ chờ modal —
+        # nếu không nó nhấp nháy giữa màn hình dù chương trình "chưa mở". Tải im lặng.
+        dlg = None if not self.winfo_viewable() else _ConvertingDialog(
+            self, f"Đang tải danh sách phiếu trình (0/{total})…")
         state = {"done": 0}
         for which, _label in self.MGMT_TABS:
             self._load_report_list(which, date_from, date_to, dlg, state, total)
 
     def _mark_report_list_done(self, dlg, state, total):
         state["done"] += 1
+        if dlg is None:
+            return
         if state["done"] >= total:
             dlg.close()
         else:
@@ -5880,5 +6218,15 @@ class PreviewWindow(tk.Toplevel):
             master._reset_form()
 
 
+def main():
+    tray = "--tray" in sys.argv[1:]
+    srv, first = single_instance_guard()
+    if not first and srv is None:
+        # Đã có 1 bản đang chạy — single_instance_guard đã gửi lệnh "hiện cửa sổ" cho nó. Thoát êm.
+        _file_logger.info("Đã có 1 bản đang chạy — thoát bản mới.")
+        return
+    App(tray_mode=tray, instance_sock=srv).mainloop()
+
+
 if __name__ == "__main__":
-    App().mainloop()
+    main()
