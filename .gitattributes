@@ -1,0 +1,4 @@
+# .bat/.cmd giữ NGUYÊN CRLF trong repo (coi như binary): cmd.exe chạy sai / "không thấy gì"
+# nếu file chỉ có LF, và raw.githubusercontent.com phục vụ đúng bytes đã lưu.
+*.bat  -text
+*.cmd  -text
