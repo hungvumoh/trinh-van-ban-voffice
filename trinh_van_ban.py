@@ -80,7 +80,7 @@ else:
 # tra — xem HUONG_DAN.md. Giữ tối đa 14 ngày gần nhất (TimedRotatingFileHandler tự xoay/xoá file
 # cũ), không phình vô hạn theo thời gian dùng.
 LOG_FILE = os.path.join(HERE, "app_log.txt")
-APP_VERSION = "2026-08-21"
+APP_VERSION = "2026-08-27"
 
 def _setup_file_logger():
     logger = logging.getLogger("trinh_van_ban")
