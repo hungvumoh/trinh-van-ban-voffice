@@ -4341,7 +4341,7 @@ class App(tk.Tk):
         has_data = bool(self.file_report.get().strip() or self.doc_sections[0].file_draft.get().strip())
         if has_data and not messagebox.askyesno(
                 "Sửa phiếu trình" if mode == "edit" else "Sao chép phiếu trình",
-                f"Form \"Soạn văn bản\" đang có dữ liệu chưa lưu — chuyển sang {verb} phiếu này "
+                f"Form \"Trình văn bản\" đang có dữ liệu chưa lưu — chuyển sang {verb} phiếu này "
                 "sẽ xoá hết dữ liệu đang nhập. Tiếp tục?"):
             return
         self._reset_form()
