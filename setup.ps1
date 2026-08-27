@@ -77,9 +77,10 @@ try {
     Ok "  Da tai xong."
 
     # ---------- 3. Thu vien ----------
-    Say "`n[3/4] Cai thu vien Python (co the mat vai phut)..."
-    & $py -m pip install --upgrade pip --quiet --disable-pip-version-check
-    & $py -m pip install --upgrade --quiet --disable-pip-version-check -r (Join-Path $InstallDir 'requirements.txt')
+    Say "`n[3/4] Cai thu vien Python (co the mat vai phut - cu de no chay)..."
+    Write-Host "  (Se thay 'Collecting...', 'Downloading...' chay lien tuc - do la binh thuong)" -ForegroundColor DarkGray
+    & $py -m pip install --upgrade pip --disable-pip-version-check
+    & $py -m pip install --upgrade --disable-pip-version-check -r (Join-Path $InstallDir 'requirements.txt')
     if ($LASTEXITCODE -ne 0) { throw "pip install that bai (ma loi $LASTEXITCODE). Kiem tra ket noi mang / proxy." }
     Ok "  Xong thu vien."
 
