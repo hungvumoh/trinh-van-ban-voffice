@@ -3405,9 +3405,9 @@ class App(tk.Tk):
         compose_tab = ttk.Frame(notebook)
         manage_tab = ttk.Frame(notebook)
         incoming_tab = ttk.Frame(notebook)
-        notebook.add(compose_tab, text="Soạn văn bản")
-        notebook.add(manage_tab, text="Quản lý Phiếu trình")
         notebook.add(incoming_tab, text="Quản lý văn bản đến")
+        notebook.add(compose_tab, text="Trình văn bản")
+        notebook.add(manage_tab, text="Quản lý Phiếu trình")
         # Giữ lại để "Sửa" (xem _edit_in_compose) tự chuyển đúng sang tab này, và để Lưu/Trình
         # xong tự nhảy sang "Quản lý Phiếu trình" (xem _open_manage_reports_tab).
         self._notebook, self._compose_tab, self._manage_tab = notebook, compose_tab, manage_tab
