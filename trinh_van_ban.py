@@ -3280,9 +3280,15 @@ class App(tk.Tk):
     def _boot_tray(self):
         """Vào từ --tray: dựng icon khay, thử đăng nhập nền bằng mật khẩu đã lưu. Không có mật
         khẩu / login hỏng → hiện màn đăng nhập cho người dùng làm tay."""
-        self._install_tray()
-        if not self.tray_mode:
-            return   # pystray không nạp được — _install_tray đã hạ cờ + hiện màn đăng nhập
+        _file_logger.info(f"[boot] chế độ khay, argv={sys.argv}")
+        self._ensure_tray()
+        if self._tray_icon is None:
+            # Thiếu pystray/pillow — vẫn dùng được, chỉ mất chế độ chạy ẩn. auto=True để nếu đã
+            # lưu mật khẩu thì vẫn tự đăng nhập (chỉ khác: cửa sổ hiện ra thay vì nằm dưới khay).
+            self.tray_mode = False
+            self._show_login(auto=True)
+            self._do_tray_show()
+            return
         user = self.settings.get("username", "")
         pw = load_password(user) if (user and self.settings.get("remember")) else None
         if not pw:
@@ -3311,20 +3317,31 @@ class App(tk.Tk):
     def _after_silent_login(self):
         self._show_main()      # dựng giao diện nhưng KHÔNG deiconify — vẫn nằm im dưới khay
         self._schedule_keepalive()
-        if self.tray_mode and self._tray_icon is not None:
+        if self._tray_icon is not None:
             self.withdraw()
             self._tray_notify("Đã sẵn sàng", f"Đã đăng nhập {self._logged_user}. Bấm icon khay để mở.")
         else:
             self._do_tray_show()   # không có khay để quay lại — cứ hiện cửa sổ ra
 
-    def _install_tray(self):
+    def _ensure_tray(self):
+        """Bảo đảm có icon khay hệ thống (Windows). Gọi được nhiều lần — đã có thì thôi. Dựng cả
+        khi mở bình thường (không chỉ --tray) để bấm ✕ thu xuống khay đúng như mong đợi.
+        Thiếu pystray/pillow → báo 1 lần rồi bỏ qua (chương trình vẫn chạy, ✕ = thoát hẳn)."""
+        if self._tray_icon is not None or not IS_WINDOWS:
+            return
         try:
             import pystray
         except Exception as e:
-            _file_logger.error(f"Không nạp được pystray ({e!r}) — chạy: pip install pystray pillow")
-            self.tray_mode = False
-            self._show_login(auto=False)
-            self._do_tray_show()
+            _file_logger.error(f"Không nạp được pystray ({e!r}) — cần: pip install pystray pillow")
+            if not getattr(self, "_warned_no_pystray", False):
+                self._warned_no_pystray = True
+                messagebox.showwarning(
+                    "Thiếu thư viện icon khay",
+                    "Chưa cài 'pystray' / 'pillow' nên KHÔNG có icon dưới khay hệ thống, và bấm "
+                    "✕ sẽ thoát hẳn (không thu xuống khay).\n\n"
+                    "Mở CMD, chạy đúng Python đang dùng:\n"
+                    "    pip install pystray pillow\n"
+                    "rồi mở lại chương trình.")
             return
         try:
             image = make_tray_image()
@@ -3343,6 +3360,7 @@ class App(tk.Tk):
         self._tray_icon = pystray.Icon("trinh_van_ban", image, "Trợ lý trình văn bản", menu)
         # icon.run() chặn luồng gọi nó — trên Windows chạy được ở thread nền thoải mái.
         threading.Thread(target=self._tray_icon.run, daemon=True).start()
+        _file_logger.info("Đã dựng icon khay hệ thống.")
 
     # Các callback dưới đây chạy TRONG luồng của pystray → mọi đụng chạm Tk phải đẩy qua after().
     def _tray_show(self, *_):
@@ -3379,8 +3397,9 @@ class App(tk.Tk):
         _file_logger.info(f"[notify] {title}: {msg}")
 
     def _on_root_close(self):
-        """✕ ở cửa sổ chính. Chế độ khay → chỉ ẩn đi (chương trình vẫn chạy). Ngược lại → thoát."""
-        if self.tray_mode and self._tray_icon is not None:
+        """✕ ở cửa sổ chính. CÓ icon khay (Windows) → chỉ ẩn xuống khay, chương trình vẫn chạy.
+        Không có icon khay → thoát hẳn."""
+        if self._tray_icon is not None:
             self.withdraw()
             self._tray_notify("Vẫn đang chạy",
                               "Đã thu xuống khay. Thoát hẳn: chuột phải icon khay → Thoát.")
@@ -3808,6 +3827,10 @@ class App(tk.Tk):
 
         self._build_manage_reports_tab(manage_tab)
         self._build_incoming_docs_tab(incoming_tab)
+
+        # Windows: luôn có icon khay sau khi đăng nhập (kể cả mở bình thường) — để bấm ✕ thu
+        # xuống khay như mong đợi. No-op nếu đã dựng từ _boot_tray, hoặc thiếu pystray.
+        self._ensure_tray()
 
     def _pick(self, var):
         p = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf"), ("Tất cả", "*.*")])
@@ -6220,6 +6243,8 @@ class PreviewWindow(tk.Toplevel):
 
 def main():
     tray = "--tray" in sys.argv[1:]
+    _file_logger.info(f"[main] argv={sys.argv} · tray={tray} · frozen={getattr(sys, 'frozen', False)} "
+                      f"· exe={sys.executable}")
     srv, first = single_instance_guard()
     if not first and srv is None:
         # Đã có 1 bản đang chạy — single_instance_guard đã gửi lệnh "hiện cửa sổ" cho nó. Thoát êm.

@@ -111,7 +111,9 @@ Từ lần bật máy sau: chương trình tự chạy ẩn (`--tray`), tự đ�
 
 **Dùng:**
 - **Bấm (đúp) icon khay** hoặc chuột phải → *Mở*: hiện cửa sổ chính.
-- Bấm **✕** trên cửa sổ: chỉ thu xuống khay, chương trình **vẫn chạy**.
+- Bấm **✕** trên cửa sổ: chỉ thu xuống khay, chương trình **vẫn chạy**. (Đúng trên Windows
+  bất cứ khi nào có icon khay — kể cả mở chương trình bình thường, không riêng chế độ `--tray`.
+  Thiếu `pystray`/`pillow` → không có icon khay và ✕ = thoát hẳn.)
 - Chuột phải icon khay: *Mở* · *Đăng nhập lại* · *Khởi động cùng Windows* (bật/tắt) · **Thoát**
   (thoát hẳn).
 - Mở lần thứ 2 (tự bấm shortcut trong khi đã có bản chạy): không mở thêm bản mới, chỉ bật cửa
