@@ -560,5 +560,83 @@ class TestTrayHelpers(unittest.TestCase):
         self.assertEqual(img.size, (40, 40))
 
 
+# ==================== Rà soát AI (parse findings, đọc file, gọi Gemini) ====================
+class TestParseAiFindings(unittest.TestCase):
+    def test_mang_rong_va_khong_co_mang(self):
+        self.assertEqual(tvb.parse_ai_findings("[]"), [])
+        self.assertEqual(tvb.parse_ai_findings("khong co gi o day"), [])
+        self.assertEqual(tvb.parse_ai_findings(""), [])
+
+    def test_go_hang_rao_code_va_chu_thua(self):
+        raw = "```json\n[{\"nhom\":\"chinh_ta\",\"mo_ta\":\"x\"},{\"nhom\":\"noi_nhan\"}]\n```  xong."
+        out = tvb.parse_ai_findings(raw)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["nhom"], "chinh_ta")
+
+    def test_loai_phan_tu_khong_phai_dict(self):
+        self.assertEqual(tvb.parse_ai_findings('["a", 1, {"nhom":"x"}]'), [{"nhom": "x"}])
+
+    def test_mang_khong_dong_thi_nem(self):
+        with self.assertRaises(ValueError):
+            tvb.parse_ai_findings("[{\"nhom\":\"x\"")
+
+    def test_json_hong_han_thi_nem(self):
+        with self.assertRaises(Exception):
+            tvb.parse_ai_findings('[{"nhom":}]')
+
+
+class TestReadAnyDocText(unittest.TestCase):
+    def test_thieu_file_tra_rong(self):
+        self.assertEqual(tvb.read_any_doc_text(""), "")
+        self.assertEqual(tvb.read_any_doc_text("/khong/ton/tai.pdf"), "")
+
+
+class TestGeminiReviewErrors(unittest.TestCase):
+    def _fake_requests(self, status, text):
+        import types
+
+        class _R:
+            status_code = status
+            def __init__(s):
+                s.text = text
+            def json(s):
+                import json as _j
+                return _j.loads(text)
+
+        mod = types.SimpleNamespace()
+        mod.post = lambda *a, **k: _R()
+        mod.RequestException = tvb.requests.RequestException
+        return mod
+
+    def test_key_sai(self):
+        orig = tvb.requests
+        tvb.requests = self._fake_requests(400, '{"error":{"message":"API key not valid"}}')
+        try:
+            with self.assertRaises(RuntimeError) as c:
+                tvb.gemini_review("k", "m", "p")
+            self.assertIn("API key", str(c.exception))
+        finally:
+            tvb.requests = orig
+
+    def test_qua_han_muc(self):
+        orig = tvb.requests
+        tvb.requests = self._fake_requests(429, "quota")
+        try:
+            with self.assertRaises(RuntimeError) as c:
+                tvb.gemini_review("k", "m", "p")
+            self.assertIn("429", str(c.exception))
+        finally:
+            tvb.requests = orig
+
+    def test_thanh_cong_tra_text(self):
+        orig = tvb.requests
+        tvb.requests = self._fake_requests(
+            200, '{"candidates":[{"content":{"parts":[{"text":"[]"}]}}]}')
+        try:
+            self.assertEqual(tvb.gemini_review("k", "m", "p"), "[]")
+        finally:
+            tvb.requests = orig
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1724,6 +1724,146 @@ def make_tray_image(size=64):
     d.text(((size - (r - l)) / 2 - l, (size - (b - t)) / 2 - t), "VB", font=font, fill="white")
     return img
 
+# ================= RÀ SOÁT AI (Gemini) — tab "Rà soát" trong Trình văn bản =================
+KR_SERVICE_AI       = "emoh_trinh_vb_ai"
+AI_KEY_ACCOUNT      = "gemini"
+GEMINI_DEFAULT_MODEL = "gemini-2.5-flash-lite"
+GEMINI_BASE         = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_KEY_URL      = "https://aistudio.google.com/apikey"
+
+# Các chốt thay thế trong mẫu prompt (dùng .replace, KHÔNG .format — mẫu có dấu {} của JSON).
+PH_SYSTEM  = "{he_thong_ghi_nhan}"
+PH_PHIEU   = "{noi_dung_phieu_trinh}"
+PH_DUTHAO  = "{noi_dung_du_thao}"
+
+AI_REVIEW_PROMPT_DEFAULT = """\
+Bạn là chuyên viên rà soát văn bản hành chính nhà nước Việt Nam. Hãy rà soát bộ hồ sơ dưới đây
+và chỉ ra các vấn đề thuộc 3 nhóm sau (KHÔNG bịa; không chắc thì để độ tin thấp):
+
+1. chinh_ta — lỗi chính tả, dấu, viết hoa danh từ riêng, khoảng trắng, và lỗi thể thức theo
+   Nghị định 30/2020/NĐ-CP (định dạng "Số: .../...-...", "V/v", "Nơi nhận:", trích yếu, ngày tháng).
+2. noi_nhan — nơi nhận có phù hợp với nội dung/loại văn bản không (thiếu đơn vị cần nhận, thừa
+   đơn vị không liên quan).
+3. luong_trinh — luồng trình đã chọn và người ký từng bước có hợp lý với loại/ký hiệu/nội dung
+   văn bản không; người ký cuối có khớp người ký ghi trong dự thảo không.
+
+CHỈ trả về một mảng JSON hợp lệ, không kèm giải thích, không kèm ```; mỗi phần tử:
+{"nhom":"chinh_ta|noi_nhan|luong_trinh","van_ban":"Phiếu trình|Dự thảo 1|...","vi_tri":"vd: trang 2",
+ "trich_dan":"đoạn văn bản gốc liên quan (ngắn)","muc_do":"cao|vua|thap",
+ "mo_ta":"vấn đề là gì","de_xuat":"nên sửa thế nào","do_tin":"cao|vua|thap"}
+Nếu không phát hiện vấn đề nào: trả về [].
+
+=== DỮ LIỆU HỆ THỐNG GHI NHẬN ===
+{he_thong_ghi_nhan}
+
+=== NỘI DUNG PHIẾU TRÌNH ===
+{noi_dung_phieu_trinh}
+
+=== NỘI DUNG VĂN BẢN DỰ THẢO ===
+{noi_dung_du_thao}
+"""
+
+def load_ai_key():
+    if keyring:
+        try:
+            return keyring.get_password(KR_SERVICE_AI, AI_KEY_ACCOUNT) or ""
+        except Exception:
+            return ""
+    return ""
+
+def save_ai_key(key):
+    """Lưu/xoá Gemini API key trong Keychain/Credential Manager (giống mật khẩu đăng nhập)."""
+    if not keyring:
+        return False
+    try:
+        if key:
+            keyring.set_password(KR_SERVICE_AI, AI_KEY_ACCOUNT, key)
+        else:
+            try:
+                keyring.delete_password(KR_SERVICE_AI, AI_KEY_ACCOUNT)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+def read_any_doc_text(path, max_pages=40):
+    """Bóc TOÀN BỘ chữ 1 file cho rà soát AI: .pdf qua pymupdf (rớt về pypdf), .docx qua
+    python-docx (kể cả chữ trong bảng, xem _iter_docx_paragraphs). Trả '' nếu không đọc được
+    (PDF scan không có lớp chữ, thiếu thư viện...) — nơi gọi tự quyết báo gì."""
+    if not path or not os.path.exists(path):
+        return ""
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".docx" and docx is not None:
+            d = docx.Document(path)
+            lines = [p.text for p in _iter_docx_paragraphs(d) if p.text.strip()]
+            return unicodedata.normalize("NFC", "\n".join(lines)).strip()
+        if fitz is not None:
+            doc = fitz.open(path)
+            try:
+                parts = []
+                for i, page in enumerate(doc):
+                    if i >= max_pages:
+                        parts.append(f"[... còn {len(doc) - max_pages} trang, đã lược ...]")
+                        break
+                    parts.append(f"--- trang {i+1} ---\n" + (page.get_text() or ""))
+                return unicodedata.normalize("NFC", "\n".join(parts)).strip()
+            finally:
+                doc.close()
+        if PdfReader is not None and ext == ".pdf":
+            reader = PdfReader(path)
+            parts = [f"--- trang {i+1} ---\n" + (pg.extract_text() or "")
+                     for i, pg in enumerate(reader.pages[:max_pages])]
+            return unicodedata.normalize("NFC", "\n".join(parts)).strip()
+    except Exception:
+        return ""
+    return ""
+
+def gemini_review(api_key, model, prompt, log=lambda *a: None):
+    """Gọi Gemini generateContent (không streaming — phản hồi rà soát ngắn). Trả text thô (mong
+    đợi là mảng JSON). Ném RuntimeError với thông báo tiếng Việt rõ ràng khi lỗi."""
+    url = f"{GEMINI_BASE}/models/{model}:generateContent"
+    body = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json",
+                             "maxOutputTokens": 8192},
+    }
+    try:
+        r = requests.post(url, params={"key": api_key}, json=body, timeout=180)
+    except requests.RequestException as e:
+        raise RuntimeError(f"Không kết nối được Gemini: {e}")
+    if r.status_code in (400, 403) and ("API_KEY_INVALID" in r.text or "API key not valid" in r.text):
+        raise RuntimeError("API key không hợp lệ — kiểm tra lại ô 'Gemini API key' trong phần Cài đặt.")
+    if r.status_code == 429:
+        raise RuntimeError("Vượt hạn mức Gemini (429). Đợi ít phút rồi thử lại, hoặc dùng key khác.")
+    if r.status_code != 200:
+        raise RuntimeError(f"Gemini trả lỗi HTTP {r.status_code}: {r.text[:400]}")
+    try:
+        j = r.json()
+        cand = j["candidates"][0]
+        return "".join(p.get("text", "") for p in cand["content"]["parts"])
+    except Exception:
+        raise RuntimeError(f"Không đọc được phản hồi Gemini: {r.text[:400]}")
+
+_AI_NHOM_LABEL = {"chinh_ta": "CHÍNH TẢ / THỂ THỨC", "noi_nhan": "NƠI NHẬN",
+                  "luong_trinh": "LUỒNG TRÌNH"}
+
+def parse_ai_findings(raw):
+    """Tách mảng JSON findings từ text Gemini trả về (có thể lẫn ```json, chữ thừa, object đơn).
+    Trả list dict. Ném ValueError nếu có mảng nhưng JSON hỏng hẳn."""
+    s = (raw or "").strip()
+    m = re.search(r"```(?:json)?\s*(.*?)```", s, re.S)
+    if m:
+        s = m.group(1).strip()
+    a, b = s.find("["), s.rfind("]")
+    if a == -1:
+        return []                       # không có mảng nào — coi như không có vấn đề
+    if b == -1 or b < a:
+        raise ValueError("Mảng JSON không đóng (phản hồi có thể bị cắt cụt).")
+    data = json.loads(s[a:b + 1])
+    return [d for d in data if isinstance(d, dict)]
+
 def load_store():
     try:
         with open(STORE_FILE, encoding="utf-8") as f:
@@ -3714,6 +3854,306 @@ class App(tk.Tk):
         self.flow_panel = FlowSignerPanel(body, self.session, self.log, self.flow_store)
         # chưa pack() — panel tự hiện/ẩn tuỳ luồng đang chọn đã có sẵn đủ người hay chưa
 
+    # ---------- Tab "Rà soát" (AI — Gemini) ----------
+    def _build_compose_tab_ra_soat(self, parent):
+        outer = ttk.Frame(parent, padding=10); outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="Rà soát chính tả · nơi nhận · luồng trình bằng AI (Google Gemini). "
+                              "Gửi nội dung phiếu trình + văn bản dự thảo tới Gemini để lấy góp ý — "
+                              "KHÔNG tự sửa gì.", wraplength=560, foreground="gray",
+                  justify="left").pack(anchor="w", pady=(0, 8))
+
+        # ----- Cài đặt -----
+        cfgbox = ttk.LabelFrame(outer, text="Cài đặt", padding=8)
+        cfgbox.pack(fill="x")
+
+        self.ai_key_var = tk.StringVar(value=load_ai_key())
+        self.ai_model_var = tk.StringVar(value=self.settings.get("ai_model") or GEMINI_DEFAULT_MODEL)
+
+        r = ttk.Frame(cfgbox); r.pack(fill="x", pady=2)
+        ttk.Label(r, text="Gemini API key:", width=16).pack(side="left")
+        self.ai_key_entry = ttk.Entry(r, textvariable=self.ai_key_var, show="•")
+        self.ai_key_entry.pack(side="left", fill="x", expand=True)
+        self.ai_key_entry.bind("<FocusOut>", lambda _e: self._ai_save_settings())
+        show_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(r, text="Hiện", variable=show_var,
+                        command=lambda: self.ai_key_entry.config(show="" if show_var.get() else "•")
+                        ).pack(side="left", padx=(4, 0))
+
+        r = ttk.Frame(cfgbox); r.pack(fill="x", pady=2)
+        ttk.Label(r, text="", width=16).pack(side="left")
+        ttk.Button(r, text="Lấy key miễn phí ↗", command=self._ai_open_key_page).pack(side="left")
+        ttk.Label(r, text="  · miễn phí trong hạn mức của Google AI Studio",
+                  foreground="gray").pack(side="left")
+
+        r = ttk.Frame(cfgbox); r.pack(fill="x", pady=2)
+        ttk.Label(r, text="Model:", width=16).pack(side="left")
+        e = ttk.Entry(r, textvariable=self.ai_model_var, width=28)
+        e.pack(side="left")
+        e.bind("<FocusOut>", lambda _e: self._ai_save_settings())
+
+        # Nâng cao — sửa mẫu prompt gửi cho AI
+        self._ai_adv_shown = False
+        self.ai_adv_btn = ttk.Button(cfgbox, text="Nâng cao — sửa nội dung yêu cầu gửi AI  ▾",
+                                     command=self._ai_toggle_advanced)
+        self.ai_adv_btn.pack(anchor="w", pady=(6, 0))
+        self.ai_adv_frame = ttk.Frame(cfgbox)
+        ttk.Label(self.ai_adv_frame, foreground="gray", justify="left", wraplength=560,
+                  text="Các chỗ {he_thong_ghi_nhan}, {noi_dung_phieu_trinh}, {noi_dung_du_thao} "
+                       "sẽ được thay bằng dữ liệu thật. Sửa để thêm/bớt loại kiểm tra."
+                  ).pack(anchor="w", pady=(4, 2))
+        self.ai_prompt_text = tk.Text(self.ai_adv_frame, height=10, wrap="word")
+        self.ai_prompt_text.insert("1.0", self.settings.get("ai_prompt") or AI_REVIEW_PROMPT_DEFAULT)
+        self.ai_prompt_text.pack(fill="x")
+        self.ai_prompt_text.bind("<FocusOut>", lambda _e: self._ai_save_settings())
+        ttk.Button(self.ai_adv_frame, text="Khôi phục mặc định",
+                   command=self._ai_restore_prompt).pack(anchor="w", pady=(4, 0))
+
+        # ----- Hành động -----
+        act = ttk.Frame(outer); act.pack(fill="x", pady=(10, 4))
+        self.ai_run_btn = ttk.Button(act, text="▶ Rà soát", command=self._run_ai_review)
+        self.ai_run_btn.pack(side="left")
+        ttk.Button(act, text="Sao chép", command=self._ai_copy).pack(side="left", padx=(6, 0))
+        ttk.Button(act, text="Xuất .txt", command=self._ai_export).pack(side="left", padx=(6, 0))
+        self.ai_status = ttk.Label(act, text="", foreground="gray")
+        self.ai_status.pack(side="left", padx=(10, 0))
+
+        # ----- Kết quả -----
+        rbox = ttk.Frame(outer); rbox.pack(fill="both", expand=True)
+        self.ai_result = tk.Text(rbox, wrap="word", state="disabled", height=16)
+        vsb = ttk.Scrollbar(rbox, orient="vertical", command=self.ai_result.yview)
+        self.ai_result.configure(yscrollcommand=vsb.set)
+        self.ai_result.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.ai_result.tag_configure("h1", font=("", 11, "bold"), spacing1=6, spacing3=2)
+        self.ai_result.tag_configure("sev_cao", foreground="#c62828", font=("", 10, "bold"))
+        self.ai_result.tag_configure("sev_vua", foreground="#e65100")
+        self.ai_result.tag_configure("sev_thap", foreground="#616161")
+        self.ai_result.tag_configure("quote", foreground="#616161", font=("", 9, "italic"))
+        self.ai_result.tag_configure("muted", foreground="#9e9e9e")
+        self._ai_result_text = ""
+        self._ai_running = False
+        self._ai_tick_id = None
+        self._ai_set_result("Bấm ▶ Rà soát để kiểm tra chính tả, nơi nhận và luồng trình bằng AI.\n"
+                            "(Điền phiếu trình + văn bản ở các tab bên trái trước.)")
+
+    def _ai_open_key_page(self):
+        import webbrowser
+        try:
+            webbrowser.open(GEMINI_KEY_URL)
+        except Exception as e:
+            messagebox.showerror("Không mở được trình duyệt", str(e))
+
+    def _ai_toggle_advanced(self):
+        self._ai_adv_shown = not self._ai_adv_shown
+        if self._ai_adv_shown:
+            self.ai_adv_frame.pack(fill="x", pady=(4, 0))
+            self.ai_adv_btn.config(text="Nâng cao — sửa nội dung yêu cầu gửi AI  ▴")
+        else:
+            self.ai_adv_frame.pack_forget()
+            self.ai_adv_btn.config(text="Nâng cao — sửa nội dung yêu cầu gửi AI  ▾")
+
+    def _ai_restore_prompt(self):
+        self.ai_prompt_text.delete("1.0", "end")
+        self.ai_prompt_text.insert("1.0", AI_REVIEW_PROMPT_DEFAULT)
+        self._ai_save_settings()
+
+    def _ai_save_settings(self):
+        self.settings["ai_model"] = self.ai_model_var.get().strip() or GEMINI_DEFAULT_MODEL
+        prompt = self.ai_prompt_text.get("1.0", "end-1c")
+        # rỗng nếu trùng mặc định — để bản mới của chương trình có đổi mẫu thì tự dùng mẫu mới
+        self.settings["ai_prompt"] = "" if prompt.strip() == AI_REVIEW_PROMPT_DEFAULT.strip() else prompt
+        save_settings(self.settings)
+        save_ai_key(self.ai_key_var.get().strip())
+
+    def _ai_set_result(self, text, *, plain=None):
+        self.ai_result.config(state="normal")
+        self.ai_result.delete("1.0", "end")
+        self.ai_result.insert("1.0", text, "muted")
+        self.ai_result.config(state="disabled")
+        self._ai_result_text = plain if plain is not None else text
+
+    def _ai_effective_prompt(self):
+        t = self.ai_prompt_text.get("1.0", "end-1c").strip()
+        return t or AI_REVIEW_PROMPT_DEFAULT
+
+    def _ai_build_system_block(self, cfg):
+        L = []
+        L.append("- Loại phiếu trình: " + ("Trình xin ý kiến" if cfg["report_mode"] == "xin_y_kien"
+                                            else "Trình ban hành văn bản"))
+        L.append("- Nội dung phiếu trình (người dùng nhập): "
+                 + ((cfg.get("report_content") or "").strip() or "(trống)"))
+        L.append(f"- Độ khẩn: {cfg.get('priority') or '(mặc định)'} · Độ mật: {cfg.get('security') or '(mặc định)'}")
+        L.append(f"- Hồ sơ công việc: {cfg.get('work_profile_name') or '(chưa chọn)'}")
+        L.append(f"- Luồng trình đã chọn: {cfg.get('flow_name') or '(chưa chọn)'}")
+        for n in (cfg.get("flow_nodes_override") or []):
+            L.append(f"    · Bước '{n.get('name') or '?'}': người ký = "
+                     f"{n.get('fullName') or '(chưa xác định)'} — {n.get('roleName') or ''}")
+        rec_labels = [("recv_inside", "Nhận nội bộ"), ("recv_report", "Báo cáo"),
+                      ("recv_edoc", "Liên thông"), ("recv_save", "Nơi lưu"), ("recv_know", "Để biết")]
+        for i, d in enumerate(cfg.get("documents") or [], start=1):
+            L.append(f"- Văn bản {i}: loại='{d.get('doc_type') or '?'}' · "
+                     f"số/ký hiệu='{d.get('code') or '?'}' · "
+                     f"trích yếu='{(d.get('abstract') or '').strip()}'")
+            recs = []
+            for key, lbl in rec_labels:
+                names = [nd.get("name") for nd in (d.get(key) or []) if isinstance(nd, dict) and nd.get("name")]
+                if names:
+                    recs.append(f"{lbl}: {', '.join(names)}")
+            L.append("    Nơi nhận: " + ("; ".join(recs) if recs else "(chưa chọn)"))
+        return "\n".join(L)
+
+    def _run_ai_review(self):
+        if self._ai_running:
+            return
+        key = self.ai_key_var.get().strip()
+        if not key:
+            self.ai_status.config(text="Chưa nhập Gemini API key (xem phần Cài đặt).", foreground="#c62828")
+            return
+        self._ai_save_settings()
+        cfg = self._collect_cfg()
+        files = [cfg.get("file_report_main")] + [d.get("file_draft_main") for d in (cfg.get("documents") or [])]
+        if not any(f for f in files):
+            self.ai_status.config(text="Chưa có file phiếu trình hoặc dự thảo để rà.", foreground="#c62828")
+            return
+        model = self.ai_model_var.get().strip() or GEMINI_DEFAULT_MODEL
+        tmpl = self._ai_effective_prompt()
+        sysblock = self._ai_build_system_block(cfg)
+        report_path = cfg.get("file_report_main")
+        doc_paths = [(i + 1, d) for i, d in enumerate(cfg.get("documents") or [])]
+
+        self._ai_running = True
+        self._ai_t0 = time.time()
+        self.ai_run_btn.config(state="disabled")
+        self._ai_set_result("Đang chuẩn bị nội dung…")
+        self._ai_tick()
+
+        def worker():
+            try:
+                phieu_text = read_any_doc_text(report_path) if report_path else ""
+                parts = []
+                got_any = bool(phieu_text)
+                for idx, d in doc_paths:
+                    t = read_any_doc_text(d.get("file_draft_main")) if d.get("file_draft_main") else ""
+                    if t:
+                        got_any = True
+                    parts.append(f"[DỰ THẢO {idx}] loại='{d.get('doc_type') or '?'}' "
+                                 f"số='{d.get('code') or '?'}'\n{t or '(không đọc được nội dung file)'}")
+                duthao_text = "\n\n".join(parts) if parts else "(không có văn bản dự thảo)"
+                if not got_any:
+                    raise RuntimeError("Không bóc được chữ từ file nào (PDF scan không có lớp chữ?). "
+                                       "Cần file có lớp chữ, hoặc tự chuyển .docx sang PDF trước.")
+                prompt = (tmpl.replace(PH_SYSTEM, sysblock)
+                              .replace(PH_PHIEU, phieu_text or "(không đọc được nội dung phiếu trình)")
+                              .replace(PH_DUTHAO, duthao_text))
+                raw = gemini_review(key, model, prompt, self.log)
+            except Exception as e:
+                msg = str(e)
+                self.after(0, lambda: self._ai_finish_error(msg))
+                return
+            try:
+                findings = parse_ai_findings(raw)
+            except Exception:
+                snippet = (raw or "")[:500]
+                self.after(0, lambda: self._ai_finish_error(
+                    "AI trả về không đúng định dạng JSON. Trích đoạn:\n" + snippet))
+                return
+            self.after(0, lambda: self._ai_finish_ok(findings))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ai_tick(self):
+        if not self._ai_running:
+            return
+        self.ai_status.config(text=f"Đang rà soát AI… ({int(time.time() - self._ai_t0)}s)",
+                              foreground="gray")
+        self._ai_tick_id = self.after(1000, self._ai_tick)
+
+    def _ai_stop_tick(self):
+        self._ai_running = False
+        if self._ai_tick_id is not None:
+            try:
+                self.after_cancel(self._ai_tick_id)
+            except tk.TclError:
+                pass
+            self._ai_tick_id = None
+        self.ai_run_btn.config(state="normal")
+
+    def _ai_finish_error(self, msg):
+        self._ai_stop_tick()
+        self.ai_status.config(text="Rà soát lỗi.", foreground="#c62828")
+        self._ai_set_result(msg)
+
+    def _ai_finish_ok(self, findings):
+        self._ai_stop_tick()
+        secs = int(time.time() - getattr(self, "_ai_t0", time.time()))
+        self.ai_status.config(text=f"Xong ({secs}s) · {len(findings)} vấn đề.", foreground="#2e7d32")
+        self._ai_render(findings)
+
+    def _ai_render(self, findings):
+        t = self.ai_result
+        t.config(state="normal")
+        t.delete("1.0", "end")
+        ts = datetime.now().strftime("%H:%M")
+        if not findings:
+            t.insert("end", f"Rà soát {ts} — ✓ Không phát hiện vấn đề nào.\n\n", "muted")
+            t.insert("end", "(AI vẫn có thể bỏ sót — người rà soát tự kiểm tra lại.)\n", "muted")
+        else:
+            t.insert("end", f"Rà soát {ts} · {len(findings)} vấn đề · độ tin do AI tự đánh giá\n\n", "muted")
+            order = ["chinh_ta", "noi_nhan", "luong_trinh"]
+            by = {}
+            for f in findings:
+                by.setdefault((f.get("nhom") or "khac"), []).append(f)
+            for nhom in order + [k for k in by if k not in order]:
+                items = by.get(nhom) or []
+                if not items:
+                    continue
+                t.insert("end", f"▍{_AI_NHOM_LABEL.get(nhom, str(nhom).upper())} ({len(items)})\n", "h1")
+                for f in items:
+                    sev = (f.get("muc_do") or "vua").lower()
+                    bullet = {"cao": "● ", "vua": "▲ ", "thap": "· "}.get(sev, "▲ ")
+                    tag = {"cao": "sev_cao", "vua": "sev_vua", "thap": "sev_thap"}.get(sev, "sev_vua")
+                    head = f"  {bullet}{f.get('van_ban') or ''}"
+                    if f.get("vi_tri"):
+                        head += f" · {f['vi_tri']}"
+                    t.insert("end", head + "\n", tag)
+                    if f.get("trich_dan"):
+                        t.insert("end", f"     \u201c{f['trich_dan']}\u201d\n", "quote")
+                    if f.get("mo_ta"):
+                        t.insert("end", f"     {f['mo_ta']}\n")
+                    if f.get("de_xuat"):
+                        t.insert("end", f"     \u2192 {f['de_xuat']}\n")
+                    dt = (f.get("do_tin") or "").lower()
+                    if dt in ("vua", "thap"):
+                        t.insert("end", f"     (độ tin: {'trung bình' if dt == 'vua' else 'thấp'})\n", "muted")
+                    t.insert("end", "\n")
+        t.insert("end", "\u2500" * 50 + "\n", "muted")
+        t.insert("end", "\u26a0 AI chỉ gợi ý, có thể sai hoặc bỏ sót. Người rà soát tự quyết.\n", "muted")
+        self._ai_result_text = t.get("1.0", "end-1c")
+        t.config(state="disabled")
+
+    def _ai_copy(self):
+        if not (self._ai_result_text or "").strip():
+            return
+        self.clipboard_clear()
+        self.clipboard_append(self._ai_result_text)
+        self.ai_status.config(text="Đã sao chép kết quả.", foreground="gray")
+
+    def _ai_export(self):
+        if not (self._ai_result_text or "").strip():
+            messagebox.showinfo("Chưa có kết quả", "Chạy rà soát trước đã.")
+            return
+        p = filedialog.asksaveasfilename(defaultextension=".txt",
+                                         filetypes=[("Văn bản", "*.txt")],
+                                         initialfile="ra_soat_ai.txt")
+        if not p:
+            return
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(self._ai_result_text)
+            self.ai_status.config(text=f"Đã lưu: {p}", foreground="gray")
+        except Exception as e:
+            messagebox.showerror("Không lưu được", str(e))
+
     def _report_mode(self):
         return "xin_y_kien" if self.mode_xin_y_kien_var.get() else "ban_hanh"
 
@@ -3781,7 +4221,7 @@ class App(tk.Tk):
         ttk.Separator(body, orient="vertical").pack(side="left", fill="y")
         content_area = ttk.Frame(body); content_area.pack(side="left", fill="both", expand=True)
 
-        COMPOSE_TABS = ("Phiếu trình", "Văn bản", "Luồng")
+        COMPOSE_TABS = ("Phiếu trình", "Văn bản", "Luồng", "Rà soát")
         self._compose_tab_pages = {}
         self._compose_tab_widgets = {}
         self._compose_tab_enabled = {name: True for name in COMPOSE_TABS}
@@ -3803,6 +4243,7 @@ class App(tk.Tk):
         self._build_compose_tab_phieu_trinh(self._compose_tab_pages["Phiếu trình"])
         self._build_compose_tab_van_ban(self._compose_tab_pages["Văn bản"])
         self._build_compose_tab_luong(self._compose_tab_pages["Luồng"])
+        self._build_compose_tab_ra_soat(self._compose_tab_pages["Rà soát"])
         self._show_compose_tab(COMPOSE_TABS[0])
 
         # ---- Cố định dưới cùng: nút CHẠY + trạng thái sẵn sàng ----

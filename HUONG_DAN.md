@@ -103,6 +103,30 @@ Nếu khung log hiện `✔ Kiểm tra OK` → phiên, upload, token đều ch�
 → Log (trong khung Xem trước) báo `✔ XONG. Phiếu trình đã lưu NHÁP.` hoặc `...đã được TRÌNH.`
 tuỳ nút đã bấm.
 
+## Tab "Rà soát" (AI — kiểm tra bằng Google Gemini)
+
+Nằm trong "Trình văn bản", cạnh Phiếu trình / Văn bản / Luồng. Gửi **nội dung phiếu trình +
+văn bản dự thảo + dữ liệu đã điền** (nơi nhận, luồng, người ký, số/ký hiệu, trích yếu…) tới
+Google Gemini để lấy góp ý về **chính tả/thể thức · nơi nhận · luồng trình hợp lý chưa**.
+Chỉ hiển thị góp ý — **không tự sửa gì**.
+
+**Lấy API key (miễn phí, làm 1 lần mỗi máy):**
+1. Trong tab "Rà soát" → phần **Cài đặt** → bấm **"Lấy key miễn phí ↗"** (mở
+   `aistudio.google.com/apikey` bằng tài khoản Google).
+2. Tạo key, copy, dán vào ô **"Gemini API key"**. Key lưu an toàn trong Keychain/Credential
+   Manager (giống mật khẩu đăng nhập), không ra file.
+
+**Dùng:** điền phiếu trình + văn bản ở các tab bên trái như bình thường → sang tab "Rà soát" →
+bấm **▶ Rà soát**. Đợi vài giây tới vài chục giây. Kết quả nhóm theo loại, mỗi vấn đề có vị
+trí, trích dẫn, mô tả, đề xuất và độ tin (do AI tự đánh giá). Có nút **Sao chép** / **Xuất .txt**.
+
+**Nâng cao:** bấm "Nâng cao — sửa nội dung yêu cầu gửi AI" để xem/sửa mẫu câu lệnh gửi cho
+Gemini (thêm/bớt loại kiểm tra). "Khôi phục mặc định" để quay lại mẫu gốc. Đổi được cả tên
+model (mặc định `gemini-2.5-flash-lite`).
+
+**Lưu ý:** đừng dùng cho văn bản có độ Mật — nội dung được gửi tới máy chủ Google. Chỉ đọc
+được file PDF **có lớp chữ** (Word xuất PDF, PDF số) và `.docx`; PDF scan ảnh không rà được.
+
 ## Lưu ý
 - "Trình văn bản" gửi thẳng vào luồng ký duyệt, không hỏi xác nhận lại — nếu lỡ trình nhầm vẫn
   thu hồi được trên hệ thống như bình thường.
