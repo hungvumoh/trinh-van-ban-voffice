@@ -1,9 +1,28 @@
 # Hướng dẫn chạy & test
 
-## Chuẩn bị (làm 1 lần)
+## Cài nhanh trên máy Windows mới (khuyên dùng)
+
+Máy đích **chưa cần có gì** (Python, Git… script tự lo). Chọn 1 trong 2:
+
+**Cách A — dán 1 dòng:** mở **PowerShell**, dán rồi Enter:
+```
+iex (iwr -useb 'https://raw.githubusercontent.com/hungvumoh/trinh-van-ban-voffice/main/setup.ps1').Content
+```
+
+**Cách B — double-click:** tải file [`install.bat`](https://raw.githubusercontent.com/hungvumoh/trinh-van-ban-voffice/main/install.bat) về, nhấp đúp.
+
+Script sẽ: cài Python (nếu thiếu) → tải chương trình về `%LOCALAPPDATA%\TroLyTrinhVanBan` →
+cài thư viện (`requirements.txt`) → tạo lối tắt Desktop + Start Menu → mở chương trình.
+**Chạy lại lệnh trên = cập nhật** lên bản mới nhất (giữ lại `noi_nhan.json` bạn sửa tay thành
+`noi_nhan.json.bak`).
+
+Cần: Windows 10+ 64-bit, có mạng. Không cần quyền admin.
+
+---
+
+## Cài thủ công (cho máy dev / khi script không chạy được)
 1. Cài Python 3.9+ (tick "Add to PATH" khi cài trên Windows).
-2. Mở Terminal/CMD, chạy: `pip install requests pypdf pymupdf keyring`
-   - Windows, muốn dùng "chạy ngầm khi bật máy" (xem cuối file): thêm `pip install pystray pillow`
+2. Mở Terminal/CMD, chạy: `pip install -r requirements.txt`
 3. Để **các file dữ liệu cùng một thư mục** với `trinh_van_ban.py` (`du_lieu.json`, `noi_nhan.json`, `cay_don_vi.json`, `luong_trinh.json`).
 
 ## Chạy
