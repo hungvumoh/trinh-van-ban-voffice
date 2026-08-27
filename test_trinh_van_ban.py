@@ -388,5 +388,120 @@ class TestMatchReport(unittest.TestCase):
                                              expect_report_id=42))
 
 
+# ==================== search_incoming_docs (tra cứu văn bản đến — tab "Quản lý văn bản đến") ====================
+HAR_INCOMING = "/Users/hnguyen/Downloads/000. Xem xoá/xem văn bản đến và search.har"
+
+
+class _FakeResp:
+    def __init__(self, text="", json_data=None, url="https://emoh.moh.gov.vn/x", status=200):
+        self.text = text
+        self._json = json_data if json_data is not None else {}
+        self.url = url
+        self.status_code = status
+
+    def json(self):
+        return self._json
+
+
+class _FakeSession:
+    """Bắt đúng payload gửi đi, không đụng mạng. `.get` trả token giả; `.post` ghi lại
+    params/data rồi trả JSON giả."""
+    def __init__(self):
+        self.last_post = None
+
+    def get(self, url, params=None, timeout=None):
+        return _FakeResp(text="TOKEN " + "A1B2C3D4E5F6G7H8J9K0LMNP", url=url)
+
+    def post(self, url, params=None, data=None, timeout=None):
+        self.last_post = {"url": url, "params": params, "data": data}
+        return _FakeResp(json_data={"items": [{"documentReceiveId": 1}], "totalRows": 496}, url=url)
+
+
+class TestSearchIncomingDocs(unittest.TestCase):
+    def test_nam_nhan_suy_ra_bookYear_va_khoang_ngay(self):
+        s = _FakeSession()
+        items, total = tvb.search_incoming_docs(s, year="2025", doc_abstract="thông tư",
+                                                 doc_code="1375", publisher_name="pháp chế",
+                                                 start=0, count=50)
+        self.assertEqual(total, 496)
+        self.assertEqual(len(items), 1)
+        d = s.last_post["data"]
+        self.assertEqual(d["documentForm.bookYear"], "2025")
+        self.assertEqual(d["documentForm.receiveDateFrom"], "2025-01-01")
+        self.assertEqual(d["documentForm.receiveDateTo"], "2025-12-31")
+        self.assertEqual(d["documentForm.documentAbstract"], "thông tư")
+        self.assertEqual(d["documentForm.documentCode"], "1375")
+        self.assertEqual(d["documentForm.publisherName"], "pháp chế")
+        # token phải nằm trên query string, không phải trong body (đúng như HAR thật)
+        self.assertEqual(s.last_post["params"]["struts.token.name"], "token")
+        self.assertEqual(s.last_post["params"]["token"], "A1B2C3D4E5F6G7H8J9K0LMNP")
+
+    def test_bo_trong_nam_thi_dung_nam_hien_tai(self):
+        from datetime import datetime
+        s = _FakeSession()
+        tvb.search_incoming_docs(s, year="")
+        y = str(datetime.now().year)
+        self.assertEqual(s.last_post["data"]["documentForm.bookYear"], y)
+        self.assertEqual(s.last_post["data"]["documentForm.receiveDateFrom"], f"{y}-01-01")
+
+    def test_phan_trang_truyen_start(self):
+        s = _FakeSession()
+        tvb.search_incoming_docs(s, year="2026", start=50, count=50)
+        self.assertEqual(s.last_post["data"]["start"], 50)
+
+    @_skip_if_missing(HAR_INCOMING)
+    def test_payload_khop_bo_khoa_cua_HAR_that(self):
+        har = json.load(open(HAR_INCOMING, encoding="utf-8"))
+        har_keys = None
+        for e in har["log"]["entries"]:
+            if "searchStaffMonitorDocument.do" in e["request"]["url"]:
+                from urllib.parse import parse_qsl
+                har_keys = {k for k, _ in parse_qsl(e["request"]["postData"]["text"], keep_blank_values=True)}
+                break
+        self.assertIsNotNone(har_keys, "HAR mẫu không có request searchStaffMonitorDocument.do")
+        s = _FakeSession()
+        tvb.search_incoming_docs(s, year="2025")
+        self.assertEqual(set(s.last_post["data"].keys()), har_keys)
+
+
+HAR_VIEW_DOC = "/Users/hnguyen/Downloads/000. Xem xoá/xem cụ thể văn bản.har"
+
+
+class TestFetchIncomingDocComments(unittest.TestCase):
+    def test_goi_dung_endpoint_va_tra_items(self):
+        s = _FakeSession()
+
+        def _post(url, params=None, data=None, timeout=None):
+            s.last_post = {"url": url, "params": params, "data": data}
+            return _FakeResp(json_data={"items": [{"commentText": "ok"}], "totalRows": 1})
+
+        s.post = _post
+        items = tvb.fetch_incoming_doc_comments(s, 504697758)
+        self.assertEqual(items, [{"commentText": "ok"}])
+        self.assertTrue(s.last_post["url"].endswith("/assignDoc!getComments.do"))
+        self.assertEqual(s.last_post["params"], {"objectId": 504697758, "objectType": 1})
+
+    def test_loi_mang_tra_list_rong_khong_nem(self):
+        s = _FakeSession()
+
+        def _boom(*a, **k):
+            raise RuntimeError("mạng lỗi")
+
+        s.post = _boom
+        self.assertEqual(tvb.fetch_incoming_doc_comments(s, 1), [])
+
+    @_skip_if_missing(HAR_VIEW_DOC)
+    def test_doc_duoc_response_getComments_that(self):
+        har = json.load(open(HAR_VIEW_DOC, encoding="utf-8"))
+        payload = None
+        for e in har["log"]["entries"]:
+            if "assignDoc!getComments.do" in e["request"]["url"]:
+                payload = json.loads(e["response"]["content"]["text"])
+                break
+        self.assertIsNotNone(payload, "HAR mẫu không có assignDoc!getComments.do")
+        items = payload.get("items") or []
+        self.assertTrue(items and "commentText" in items[0] and "userName" in items[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

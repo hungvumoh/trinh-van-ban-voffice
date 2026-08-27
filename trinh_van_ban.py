@@ -1029,6 +1029,69 @@ def _search_processed_report(s, date_from=None, date_to=None, count=50):
     r = s.post(BASE + "/voReport!onSearchReport.do", params={"grid": "processed"}, data=data, timeout=30)
     return r.json().get("items") or []
 
+# ---------- VĂN BẢN ĐẾN (tab "Quản lý văn bản đến") ----------
+def search_incoming_docs(s, *, year=None, doc_abstract="", doc_code="", publisher_name="",
+                          start=0, count=50, log=lambda *a: None):
+    """Tra cứu màn hình "Theo dõi văn bản" (văn bản đến của chuyên viên đang đăng nhập) —
+    endpoint assignDoc!searchStaffMonitorDocument.do.
+
+    Xác nhận qua HAR thật ('xem văn bản đến và search.har'): trước MỖI lần tìm, web xin token
+    mới (token!reloadToken.do) rồi POST kèm ?struts.token.name=token&token=<t>. Khác các hộp
+    phiếu trình (onSearchMyReport không cần token) — endpoint này BẮT BUỘC token trên query.
+
+    `year` (int/str): 1 ô "Năm nhận" duy nhất trên UI → đặt cả `bookYear` LẪN khoảng ngày nhận
+    YYYY-01-01..YYYY-12-31 (đúng cách web làm khi người dùng đổi năm trong HAR). Bỏ trống →
+    năm hiện tại.
+    Trả về `(items, total_rows)`. Mỗi item có sẵn: documentCode, documentAbstract, documentDate,
+    receiveDate, bookNumber, publisherName, isRead, statusStr, documentReceiveId, attachPathIcons
+    (link tải đính kèm — dùng lại parse_report_attach_icons/download_attach)."""
+    token = reload_token(s, log)
+    y = str(year).strip() if str(year or "").strip() else str(datetime.now().year)
+    data = {
+        "documentForm.searchValue": "",
+        "documentForm.isInBook": "-1",
+        "documentForm.bookYear": y,
+        "documentForm.bookId": "-1",
+        "documentForm.documentCode": doc_code or "",
+        "documentForm.userCreateName": "",
+        "documentForm.bookNumber": "",
+        "documentForm.documentTypeId": "-1",
+        "documentForm.receiveDateFrom": f"{y}-01-01",
+        "documentForm.receiveDateTo": f"{y}-12-31",
+        "documentForm.publishDateFrom": "", "documentForm.publishDateTo": "",
+        "documentForm.deadlineFrom": "", "documentForm.deadlineTo": "",
+        "documentForm.publishDocCode": "", "documentForm.publishDocAbstract": "",
+        "documentForm.officeType": "-1",
+        "documentForm.publisherName": publisher_name or "",
+        "documentForm.documentAbstract": doc_abstract or "",
+        "documentForm.status": "-1",
+        # HAR chỉ bắt được trang 1 (start=0, startval=0). `startval` = offset trang cho lưới
+        # dojo — suy từ `start`, chưa kiểm chứng phân trang thật; nếu "Trang sau" lệch thì xem
+        # lại đúng cặp này.
+        "q": "*", "start": start, "count": count, "startval": start,
+    }
+    r = s.post(BASE + "/assignDoc!searchStaffMonitorDocument.do",
+               params={"struts.token.name": "token", "token": token}, data=data, timeout=30)
+    j = r.json()
+    return (j.get("items") or []), int(j.get("totalRows") or 0)
+
+def fetch_incoming_doc_comments(s, doc_receive_id, log=lambda *a: None):
+    """Ý kiến xử lý của 1 văn bản đến (khung "Ý kiến xử lý" khi mở chi tiết văn bản trên web) —
+    endpoint assignDoc!getComments.do?objectId=<documentReceiveId>&objectType=1.
+
+    Xác nhận qua HAR thật ('xem cụ thể văn bản.har', entry getComments): JSON gọn, KHÔNG cần
+    token, `objectId` truyền tường minh nên gọi thẳng được (không phải nạp trước loadView.do —
+    trang HTML 360KB — chỉ để "mở" văn bản phía server). Mỗi item: commentText, userName,
+    groupName, createdDate, processCommentType. Server trả theo thứ tự thời gian tăng dần."""
+    try:
+        r = s.post(BASE + "/assignDoc!getComments.do",
+                   params={"objectId": doc_receive_id, "objectType": 1},
+                   data={"q": "*", "start": 0, "count": 50, "startval": 0}, timeout=30)
+        return r.json().get("items") or []
+    except Exception as e:
+        log(f"   • Không tra được ý kiến xử lý của văn bản (id={doc_receive_id}): {e!r}")
+        return []
+
 def _match_report(items, content, creator_id, since_dt, expect_report_id=None):
     """Khớp đúng phiếu trình VỪA lưu trong `items` (kết quả _search_my_report).
     `expect_report_id`: có giá trị khi đang SỬA 1 phiếu trình đã có (biết chắc ID trước khi lưu)
@@ -3341,11 +3404,14 @@ class App(tk.Tk):
         notebook.pack(fill="both", expand=True)
         compose_tab = ttk.Frame(notebook)
         manage_tab = ttk.Frame(notebook)
+        incoming_tab = ttk.Frame(notebook)
         notebook.add(compose_tab, text="Soạn văn bản")
         notebook.add(manage_tab, text="Quản lý Phiếu trình")
+        notebook.add(incoming_tab, text="Quản lý văn bản đến")
         # Giữ lại để "Sửa" (xem _edit_in_compose) tự chuyển đúng sang tab này, và để Lưu/Trình
         # xong tự nhảy sang "Quản lý Phiếu trình" (xem _open_manage_reports_tab).
         self._notebook, self._compose_tab, self._manage_tab = notebook, compose_tab, manage_tab
+        self._incoming_tab = incoming_tab
 
         # ---- Sidebar 4 tab dọc (trái) + nội dung tab (phải); CHẠY/trạng thái cố định ở dưới
         # cùng, thấy được dù đang xem tab nào — xem _show_compose_tab()/_build_compose_tab_*().
@@ -3408,6 +3474,7 @@ class App(tk.Tk):
         self._fetch_flow_data()   # sau cùng — logbox đã có sẵn để self.log() gọi từ luồng nền
 
         self._build_manage_reports_tab(manage_tab)
+        self._build_incoming_docs_tab(incoming_tab)
 
     def _pick(self, var):
         p = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf"), ("Tất cả", "*.*")])
@@ -4058,6 +4125,196 @@ class App(tk.Tk):
         if not item:
             return
         ReportDetailWindow(self, item, which, self.session)
+
+    # ---------- TAB "QUẢN LÝ VĂN BẢN ĐẾN" ----------
+    # Tra cứu văn bản đến (màn hình "Theo dõi văn bản" trên web) — chỉ ĐỌC: lọc + xem danh sách
+    # + mở chi tiết + tải file đính kèm. Không có thao tác ghi. Backend: search_incoming_docs().
+    INCOMING_PAGE_SIZE = 50
+    INCOMING_COLUMNS = (
+        ("stt", "STT", 44),
+        ("received", "Ngày nhận", 130),
+        ("code", "Số/ký hiệu", 130),
+        ("docdate", "Ngày VB", 92),
+        ("abstract", "Trích yếu", 400),
+        ("publisher", "Cơ quan ban hành", 160),
+        ("booknum", "Số đến", 64),
+        ("statusstr", "Trạng thái", 90),
+        ("attach", "📎", 34),
+    )
+    INCOMING_ABSTRACT_WRAP = 60   # ký tự/dòng khi bọc cột "Trích yếu" — cùng ý với MGMT_CONTENT_WRAP
+
+    def _build_incoming_docs_tab(self, parent):
+        # --- Thanh lọc: 4 ô người dùng chốt (Trích yếu / Số ký hiệu / Năm nhận / Cơ quan ban
+        #     hành). "Năm nhận" 1 ô duy nhất → search_incoming_docs tự suy bookYear + khoảng ngày.
+        top = ttk.Frame(parent); top.pack(fill="x", padx=8, pady=(8, 4))
+        self.inc_year = tk.StringVar(value=str(datetime.now().year))
+        self.inc_code = tk.StringVar()
+        self.inc_publisher = tk.StringVar()
+        self.inc_abstract = tk.StringVar()
+
+        r1 = ttk.Frame(top); r1.pack(fill="x")
+        ttk.Label(r1, text="Trích yếu:").pack(side="left")
+        ttk.Entry(r1, textvariable=self.inc_abstract, width=34).pack(side="left", padx=(2, 10))
+        ttk.Label(r1, text="Số/ký hiệu:").pack(side="left")
+        ttk.Entry(r1, textvariable=self.inc_code, width=16).pack(side="left", padx=(2, 10))
+        ttk.Label(r1, text="Năm nhận:").pack(side="left")
+        ttk.Entry(r1, textvariable=self.inc_year, width=7).pack(side="left", padx=(2, 10))
+
+        r2 = ttk.Frame(top); r2.pack(fill="x", pady=(4, 0))
+        ttk.Label(r2, text="Cơ quan ban hành:").pack(side="left")
+        ttk.Entry(r2, textvariable=self.inc_publisher, width=34).pack(side="left", padx=(2, 10))
+        ttk.Button(r2, text="🔍 Tìm", command=self._incoming_search).pack(side="left")
+        ttk.Button(r2, text="Xoá lọc", command=self._incoming_clear_filters).pack(side="left", padx=(6, 0))
+
+        # Cho phép Enter ở bất kỳ ô lọc nào để tìm luôn.
+        for var_owner in (r1, r2):
+            for w in var_owner.winfo_children():
+                if isinstance(w, ttk.Entry):
+                    w.bind("<Return>", lambda _e: self._incoming_search())
+
+        # --- Bảng kết quả ---
+        body = ttk.Frame(parent); body.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        cols = [c[0] for c in self.INCOMING_COLUMNS]
+        style = ttk.Style(self)
+        line_h = tkfont.nametofont("TkDefaultFont").metrics("linespace")
+        style.configure("Incoming.Treeview", rowheight=line_h * 2 + 12)   # cột trích yếu 2 dòng
+        tree = ttk.Treeview(body, columns=cols, show="headings", height=14, style="Incoming.Treeview")
+        for key, title, width in self.INCOMING_COLUMNS:
+            tree.heading(key, text=title)
+            tree.column(key, width=width, anchor="w")
+        tree.tag_configure("odd", background=self._TREE_ZEBRA)
+        tree.tag_configure("unread", font=("", 10, "bold"))   # văn bản chưa đọc (isRead == 0) in đậm
+        vsb = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        tree.bind("<Double-1>", lambda _e: self._open_incoming_detail())
+        self.inc_tree = tree
+        self.inc_items = {}      # iid (documentReceiveId) -> item dict đầy đủ
+        self.inc_start = 0       # offset trang hiện tại
+        self.inc_total = 0
+
+        # --- Thanh phân trang ---
+        pager = ttk.Frame(parent); pager.pack(fill="x", padx=8, pady=(0, 8))
+        self.inc_prev_btn = ttk.Button(pager, text="◀ Trang trước", command=self._incoming_page_prev)
+        self.inc_prev_btn.pack(side="left")
+        self.inc_next_btn = ttk.Button(pager, text="Trang sau ▶", command=self._incoming_page_next)
+        self.inc_next_btn.pack(side="left", padx=(6, 0))
+        self.inc_page_label = ttk.Label(pager, text="", foreground="gray")
+        self.inc_page_label.pack(side="left", padx=(10, 0))
+        self._incoming_update_pager()
+
+        ttk.Label(parent, text=AUTHOR_MARK, font=("", 8), foreground="#999999").pack(
+            anchor="e", padx=12, pady=(0, 6))
+
+    def _incoming_clear_filters(self):
+        self.inc_code.set("")
+        self.inc_publisher.set("")
+        self.inc_abstract.set("")
+        self.inc_year.set(str(datetime.now().year))
+        self._incoming_search()
+
+    def _incoming_search(self, keep_page=False):
+        """Gọi khi bấm Tìm / Xoá lọc / phân trang. `keep_page=False` → về trang đầu (đổi điều
+        kiện lọc); True → giữ nguyên self.inc_start (bấm Trang trước/sau)."""
+        year = self.inc_year.get().strip()
+        if year and (not year.isdigit() or len(year) != 4):
+            messagebox.showerror("Năm không hợp lệ", "Ô 'Năm nhận' phải là 4 chữ số, vd 2026 "
+                                 "(hoặc để trống = năm hiện tại).")
+            return
+        if not keep_page:
+            self.inc_start = 0
+        s = self.session
+        filters = dict(year=year, doc_abstract=self.inc_abstract.get().strip(),
+                       doc_code=self.inc_code.get().strip(),
+                       publisher_name=self.inc_publisher.get().strip())
+        start = self.inc_start
+        dlg = _ConvertingDialog(self, "Đang tra cứu văn bản đến…")
+
+        def worker():
+            try:
+                items, total = search_incoming_docs(
+                    s, start=start, count=self.INCOMING_PAGE_SIZE, log=self.log, **filters)
+            except Exception as e:
+                self.after(0, dlg.close)
+                self.after(0, lambda: messagebox.showerror(
+                    "Lỗi tra cứu", f"Không tra cứu được văn bản đến:\n{e!r}"))
+                return
+            self.after(0, lambda: (self._apply_incoming_results(items, total), dlg.close()))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_incoming_results(self, items, total):
+        self.inc_total = total
+        self.inc_items = {}
+        for it in items:
+            iid = str(it.get("documentReceiveId") or it.get("stt") or len(self.inc_items))
+            self.inc_items[iid] = it
+        self._render_incoming_tree()
+        self._incoming_update_pager()
+
+    def _render_incoming_tree(self):
+        tree = self.inc_tree
+        tree.delete(*tree.get_children())
+        for i, (iid, it) in enumerate(self.inc_items.items()):
+            received = (it.get("receiveDate") or "").replace("T", " ")
+            docdate = (it.get("documentDate") or "")[:10]
+            abstract = (it.get("documentAbstract") or "").strip()
+            lines = textwrap.wrap(abstract, width=self.INCOMING_ABSTRACT_WRAP) or [""]
+            if len(lines) > 2:
+                lines = lines[:2]
+                lines[-1] = lines[-1].rstrip() + "…"
+            wrapped = "\n".join(lines)
+            has_attach = "📎" if (it.get("attachPathIcons") or "").strip() else ""
+            tags = []
+            if i % 2:
+                tags.append("odd")
+            if it.get("isRead") == 0:
+                tags.append("unread")
+            tree.insert("", "end", iid=iid, tags=tuple(tags), values=(
+                it.get("stt") or (i + 1),
+                received,
+                it.get("documentCode") or "",
+                docdate,
+                wrapped,
+                it.get("publisherName") or "",
+                it.get("bookNumber") or "",
+                it.get("statusStr") or "",
+                has_attach,
+            ))
+
+    def _incoming_update_pager(self):
+        start = self.inc_start
+        shown = len(self.inc_items)
+        total = self.inc_total
+        if total <= 0:
+            self.inc_page_label.config(text="(chưa có kết quả — bấm Tìm)" if shown == 0 else "0 kết quả")
+        else:
+            self.inc_page_label.config(text=f"{start + 1}–{start + shown} / {total} văn bản")
+        self.inc_prev_btn.config(state=("normal" if start > 0 else "disabled"))
+        has_next = (start + self.INCOMING_PAGE_SIZE) < total
+        self.inc_next_btn.config(state=("normal" if has_next else "disabled"))
+
+    def _incoming_page_prev(self):
+        if self.inc_start <= 0:
+            return
+        self.inc_start = max(0, self.inc_start - self.INCOMING_PAGE_SIZE)
+        self._incoming_search(keep_page=True)
+
+    def _incoming_page_next(self):
+        if (self.inc_start + self.INCOMING_PAGE_SIZE) >= self.inc_total:
+            return
+        self.inc_start += self.INCOMING_PAGE_SIZE
+        self._incoming_search(keep_page=True)
+
+    def _open_incoming_detail(self):
+        sel = self.inc_tree.selection()
+        if not sel:
+            return
+        item = self.inc_items.get(sel[0])
+        if not item:
+            return
+        IncomingDocDetailWindow(self, item, self.session)
 
     def _edit_in_compose(self, item):
         """Nút "Sửa" (chỉ hiện ở phiếu Nháp) — tải + điền lại để CẬP NHẬT đúng phiếu/văn bản cũ
@@ -4766,6 +5023,198 @@ class ReportDetailWindow(tk.Toplevel):
     def _copy_to_compose(self):
         self.master._copy_in_compose(self.item)
         self.destroy()
+
+
+class IncomingDocDetailWindow(tk.Toplevel):
+    """Xem chi tiết 1 văn bản đến (tab "Quản lý văn bản đến"). CHỈ ĐỌC: các trường có sẵn trong
+    kết quả tra cứu (search_incoming_docs) + Ý kiến xử lý (fetch_incoming_doc_comments) + danh
+    sách file đính kèm (tải/mở). Không dựng "Danh sách xử lý" (luồng phân công) — endpoint đó
+    chưa bắt được trong HAR."""
+
+    def __init__(self, master, item, session):
+        super().__init__(master)
+        self.transient(master)
+        self.item = item
+        self.session = session
+        self.doc_receive_id = item.get("documentReceiveId")
+        self._tmpdir = None   # tạo lười khi lần đầu tải/mở file
+        # Trên macOS, đóng 1 Toplevel không tự trả bàn phím về cửa sổ cha — các ô lọc ở tab
+        # "Quản lý văn bản đến" gõ không ăn cho tới khi bấm vào lại (chính là lỗi người dùng
+        # báo). Ép focus về master ở _close(), gắn cho cả nút Đóng lẫn nút [X] (xem
+        # PreviewWindow._on_close dùng đúng cách này).
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+        code = item.get("documentCode") or "(không số)"
+        self.title(f"Chi tiết văn bản đến — {code}")
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(int(sw * 0.55), 720), min(int(sh * 0.75), 720)
+        self.geometry(f"{w}x{h}")
+        self.minsize(460, 380)
+
+        top = ttk.Frame(self, padding=(10, 8)); top.pack(fill="x")
+        ttk.Button(top, text="Đóng", command=self._close).pack(side="left")
+        ttk.Button(top, text="Mở file đang chọn", command=self._open_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="Tải file đang chọn", command=self._download_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="Tải toàn bộ tài liệu", command=self._download_all).pack(side="left", padx=(6, 0))
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self.status_var, padding=(10, 4),
+                  wraplength=w - 40, justify="left").pack(fill="x")
+
+        body = ttk.Frame(self, padding=8); body.pack(fill="both", expand=True)
+        self._build_info(body)
+
+        box = ttk.LabelFrame(body, text="File đính kèm (bấm đúp để mở)", padding=6)
+        box.pack(fill="both", expand=True, pady=(0, 6))
+        wrap = ttk.Frame(box); wrap.pack(fill="both", expand=True)
+        self.attach_list = tk.Listbox(wrap, height=4)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.attach_list.yview)
+        self.attach_list.configure(yscrollcommand=vsb.set)
+        self.attach_list.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.attach_list.bind("<Double-1>", lambda _e: self._open_selected())
+
+        # href trong attachPathIcons là đường dẫn tương đối (uploadiframe!openFile.do?token=…&
+        # attachId=…) — token đã nhúng sẵn, không cần API riêng (giống file phiếu trình, xem
+        # ReportDetailWindow.__init__).
+        self._attachs = [{"name": title, "url": BASE + "/" + html_unescape(href)}
+                         for href, title in parse_report_attach_icons(item.get("attachPathIcons"))]
+        for a in self._attachs:
+            self.attach_list.insert("end", a["name"])
+        if not self._attachs:
+            self.attach_list.insert("end", "(không có file đính kèm)")
+            self.attach_list.config(state="disabled")
+
+        cbox = ttk.LabelFrame(body, text="Ý kiến xử lý", padding=6)
+        cbox.pack(fill="both", expand=True, pady=(0, 4))
+        cwrap = ttk.Frame(cbox); cwrap.pack(fill="both", expand=True)
+        self.comment_list = tk.Listbox(cwrap, height=6)
+        cvsb = ttk.Scrollbar(cwrap, orient="vertical", command=self.comment_list.yview)
+        self.comment_list.configure(yscrollcommand=cvsb.set)
+        self.comment_list.pack(side="left", fill="both", expand=True)
+        cvsb.pack(side="right", fill="y")
+        self.comment_list.insert("end", "(đang tải ý kiến xử lý…)")
+
+        self._load_comments()
+
+    def _close(self):
+        master = self.master
+        self.destroy()
+        try:
+            master.lift()
+            master.focus_force()
+        except Exception:
+            pass
+
+    def _load_comments(self):
+        s, did = self.session, self.doc_receive_id
+        if not did:
+            self._apply_comments([])
+            return
+
+        def worker():
+            comments = fetch_incoming_doc_comments(s, did, self.master.log)
+            self.after(0, lambda: self._apply_comments(comments))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_comments(self, comments):
+        self.comment_list.delete(0, "end")
+        if not comments:
+            self.comment_list.insert("end", "(không có ý kiến xử lý)")
+            return
+        for c in comments:
+            when = (c.get("createdDate") or "").replace("T", " ")
+            who = c.get("userName") or ""
+            grp = c.get("groupName") or ""
+            head = f"{when} — {who}" + (f" ({grp})" if grp else "")
+            self.comment_list.insert("end", head)
+            for line in textwrap.wrap((c.get("commentText") or "").strip(), width=90) or ["(trống)"]:
+                self.comment_list.insert("end", f"    {line}")
+            self.comment_list.insert("end", "")
+
+    def _row(self, parent, label, value):
+        f = ttk.Frame(parent); f.pack(fill="x", pady=1)
+        ttk.Label(f, text=label, width=16, font=("", 9, "bold")).pack(side="left", anchor="n")
+        ttk.Label(f, text=value or "", wraplength=460, justify="left").pack(side="left", fill="x", expand=True)
+
+    def _build_info(self, parent):
+        it = self.item
+        box = ttk.LabelFrame(parent, text="Thông tin văn bản", padding=6)
+        box.pack(fill="x", pady=(0, 6))
+        self._row(box, "Số/ký hiệu:", it.get("documentCode"))
+        self._row(box, "Trích yếu:", (it.get("documentAbstract") or "").strip())
+        self._row(box, "Ngày văn bản:", (it.get("documentDate") or "")[:10])
+        self._row(box, "Ngày nhận:", (it.get("receiveDate") or "").replace("T", " "))
+        self._row(box, "Cơ quan ban hành:", it.get("publisherName"))
+        self._row(box, "Số đến:", it.get("bookNumber"))
+        self._row(box, "Trạng thái:", it.get("statusStr"))
+        self._row(box, "Tình trạng đọc:", "Chưa đọc" if it.get("isRead") == 0 else "Đã đọc")
+
+    def _selected(self):
+        if not self._attachs:
+            return None
+        sel = self.attach_list.curselection()
+        if not sel:
+            messagebox.showinfo("Chưa chọn file", "Chọn 1 file trong danh sách trước.", parent=self)
+            return None
+        return self._attachs[sel[0]]
+
+    def _ensure_tmpdir(self):
+        if self._tmpdir is None:
+            self._tmpdir = tempfile.mkdtemp(prefix="voffice_incoming_")
+        return self._tmpdir
+
+    def _open_selected(self):
+        a = self._selected()
+        if not a:
+            return
+        self.status_var.set(f"Đang tải {a['name']}…")
+        dest = os.path.join(self._ensure_tmpdir(), a["name"])
+
+        def worker():
+            try:
+                download_attach(self.session, a["url"], dest, self.master.log)
+                open_file_with_default_app(dest)
+                self.after(0, lambda: self.status_var.set(f"Đã mở: {a['name']}"))
+            except Exception as e:
+                self.after(0, lambda: self.status_var.set(f"Lỗi mở file: {e!r}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_selected(self):
+        a = self._selected()
+        if not a:
+            return
+        self._download_to_folder([a])
+
+    def _download_all(self):
+        if not self._attachs:
+            messagebox.showinfo("Không có file", "Văn bản này không có file đính kèm.", parent=self)
+            return
+        self._download_to_folder(self._attachs)
+
+    def _download_to_folder(self, attachs):
+        folder = filedialog.askdirectory(parent=self, title="Chọn thư mục lưu file")
+        if not folder:
+            return
+        s = self.session
+        self.status_var.set(f"Đang tải {len(attachs)} file…")
+
+        def worker():
+            ok, fail = 0, []
+            for a in attachs:
+                try:
+                    download_attach(s, a["url"], os.path.join(folder, a["name"]), self.master.log)
+                    ok += 1
+                except Exception as e:
+                    fail.append(f"{a['name']}: {e!r}")
+            msg = f"Đã tải {ok}/{len(attachs)} file vào {folder}."
+            if fail:
+                msg += "  Lỗi: " + "; ".join(fail)
+            self.after(0, lambda: self.status_var.set(msg))
+
+        threading.Thread(target=worker, daemon=True).start()
 
 
 class PreviewWindow(tk.Toplevel):
