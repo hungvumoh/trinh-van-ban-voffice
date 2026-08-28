@@ -6756,7 +6756,12 @@ def main():
         # Đã có 1 bản đang chạy — single_instance_guard đã gửi lệnh "hiện cửa sổ" cho nó. Thoát êm.
         _file_logger.info("Đã có 1 bản đang chạy — thoát bản mới.")
         return
-    App(tray_mode=tray, instance_sock=srv).mainloop()
+    try:
+        App(tray_mode=tray, instance_sock=srv).mainloop()
+    except KeyboardInterrupt:
+        # Ctrl+C ở terminal — thoát êm, khỏi in traceback KeyboardInterrupt (vô hại, chỉ là
+        # cách dừng thô; nên đóng bằng nút ✕ / khay → Thoát).
+        pass
 
 
 if __name__ == "__main__":
