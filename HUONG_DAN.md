@@ -107,8 +107,19 @@ tuỳ nút đã bấm.
 
 Nằm trong "Trình văn bản", cạnh Phiếu trình / Văn bản / Luồng. Gửi **nội dung phiếu trình +
 văn bản dự thảo + dữ liệu đã điền** (nơi nhận, luồng, người ký, số/ký hiệu, trích yếu…) tới
-Google Gemini để lấy góp ý về **chính tả/thể thức · nơi nhận · luồng trình hợp lý chưa**.
+Google Gemini để lấy góp ý theo 4 nhóm:
+- **Chính tả / thể thức** (Nghị định 30/2020/NĐ-CP)
+- **Thống nhất thông tin** — số/ký hiệu, ngày, tên, địa chỉ, số liệu có khớp giữa phiếu trình
+  ↔ các dự thảo ↔ hồ sơ kèm không
+- **Nơi nhận** — danh sách hệ thống đang chọn có khớp mục "Nơi nhận:" in trong văn bản không
+- **Luồng trình** — người ký bước cuối của luồng có khớp chức danh/tên ký ở cuối dự thảo không
+
 Chỉ hiển thị góp ý — **không tự sửa gì**.
+
+**Giấy chứng nhận đủ điều kiện kinh doanh:** nếu 1 dự thảo là Giấy chứng nhận (app tự nhận theo
+loại VB / trích yếu), chương trình **tự gửi kèm luôn nội dung "Tài liệu thêm" của chính văn bản
+đó** (= hồ sơ đề nghị cấp phép) để AI đối chiếu tên cơ sở / địa chỉ / phạm vi kinh doanh / người
+phụ trách chuyên môn + số CCHN / ngày. Đầu kết quả có dòng "ℹ … đã gửi kèm N tài liệu hồ sơ…".
 
 **Lấy API key (miễn phí, làm 1 lần mỗi máy):**
 1. Trong tab "Rà soát" → phần **Cài đặt** → bấm **"Lấy key miễn phí ↗"** (mở

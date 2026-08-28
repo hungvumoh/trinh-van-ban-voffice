@@ -591,6 +591,24 @@ class TestReadAnyDocText(unittest.TestCase):
         self.assertEqual(tvb.read_any_doc_text("/khong/ton/tai.pdf"), "")
 
 
+class TestIsGcnDdkkd(unittest.TestCase):
+    def test_theo_loai_van_ban(self):
+        self.assertTrue(tvb._is_gcn_ddkkd({"doc_type": "Giấy chứng nhận"}))
+        self.assertTrue(tvb._is_gcn_ddkkd({"doc_type": "  giấy chứng nhận  "}))
+
+    def test_theo_trich_yeu(self):
+        self.assertTrue(tvb._is_gcn_ddkkd(
+            {"doc_type": "", "abstract": "Giấy chứng nhận đủ điều kiện kinh doanh dược"}))
+
+    def test_khong_phai(self):
+        self.assertFalse(tvb._is_gcn_ddkkd({"doc_type": "Quyết định", "abstract": "v/v thành lập đoàn"}))
+        self.assertFalse(tvb._is_gcn_ddkkd({}))
+
+    def test_thu_tu_nhom_va_nhan(self):
+        self.assertEqual(tvb._AI_NHOM_ORDER, ["chinh_ta", "thong_nhat", "noi_nhan", "luong_trinh"])
+        self.assertIn("thong_nhat", tvb._AI_NHOM_LABEL)
+
+
 class TestGeminiReviewErrors(unittest.TestCase):
     def _fake_requests(self, status, text):
         import types

@@ -1737,19 +1737,31 @@ PH_PHIEU   = "{noi_dung_phieu_trinh}"
 PH_DUTHAO  = "{noi_dung_du_thao}"
 
 AI_REVIEW_PROMPT_DEFAULT = """\
-Bạn là chuyên viên rà soát văn bản hành chính nhà nước Việt Nam. Hãy rà soát bộ hồ sơ dưới đây
-và chỉ ra các vấn đề thuộc 3 nhóm sau (KHÔNG bịa; không chắc thì để độ tin thấp):
+Bạn là chuyên viên rà soát văn bản hành chính nhà nước Việt Nam. Rà soát bộ hồ sơ dưới đây và
+chỉ ra các vấn đề thuộc 4 nhóm sau (KHÔNG bịa; không chắc thì để độ tin thấp):
 
-1. chinh_ta — lỗi chính tả, dấu, viết hoa danh từ riêng, khoảng trắng, và lỗi thể thức theo
-   Nghị định 30/2020/NĐ-CP (định dạng "Số: .../...-...", "V/v", "Nơi nhận:", trích yếu, ngày tháng).
-2. noi_nhan — nơi nhận có phù hợp với nội dung/loại văn bản không (thiếu đơn vị cần nhận, thừa
-   đơn vị không liên quan).
-3. luong_trinh — luồng trình đã chọn và người ký từng bước có hợp lý với loại/ký hiệu/nội dung
-   văn bản không; người ký cuối có khớp người ký ghi trong dự thảo không.
+1. chinh_ta — lỗi chính tả, dấu, viết hoa danh từ riêng, khoảng trắng; lỗi thể thức theo Nghị
+   định 30/2020/NĐ-CP (định dạng "Số: .../...-...", "V/v", "Nơi nhận:", trích yếu, ngày tháng).
+
+2. thong_nhat — thông tin có KHỚP giữa phiếu trình ↔ từng dự thảo ↔ (nếu có) hồ sơ kèm: số/ký
+   hiệu văn bản, ngày tháng, tên văn bản/trích yếu, tên tổ chức–cá nhân, địa chỉ, số liệu, căn
+   cứ pháp lý. Nêu rõ tài liệu nào ghi gì khác tài liệu nào.
+   Nếu có khối [HỒ SƠ KÈM DỰ THẢO n]: đó là hồ sơ đề nghị cấp Giấy chứng nhận đủ điều kiện kinh
+   doanh — kiểm tra dự thảo Giấy chứng nhận khớp với hồ sơ này ở: tên cơ sở, địa chỉ, phạm vi
+   kinh doanh, người phụ trách chuyên môn + số chứng chỉ hành nghề, các mốc ngày.
+
+3. noi_nhan — SO danh sách "Nơi nhận" hệ thống đang chọn (ghi trong DỮ LIỆU HỆ THỐNG GHI NHẬN)
+   với mục "Nơi nhận:" IN TRONG văn bản dự thảo: đơn vị có trong văn bản mà hệ thống chưa chọn;
+   đơn vị hệ thống chọn mà văn bản không có; đơn vị mà nội dung văn bản cho thấy cần gửi nhưng
+   cả hai đều thiếu.
+
+4. luong_trinh — người ký BƯỚC CUỐI của luồng (tên + chức danh trong DỮ LIỆU HỆ THỐNG) có khớp
+   chức danh/tên người ký ghi ở CUỐI dự thảo không (Cục trưởng / Thứ trưởng / Bộ trưởng…); luồng
+   có khớp ký hiệu/loại văn bản không (…-QLD → cấp Cục, …-BYT → cấp Bộ).
 
 CHỈ trả về một mảng JSON hợp lệ, không kèm giải thích, không kèm ```; mỗi phần tử:
-{"nhom":"chinh_ta|noi_nhan|luong_trinh","van_ban":"Phiếu trình|Dự thảo 1|...","vi_tri":"vd: trang 2",
- "trich_dan":"đoạn văn bản gốc liên quan (ngắn)","muc_do":"cao|vua|thap",
+{"nhom":"chinh_ta|thong_nhat|noi_nhan|luong_trinh","van_ban":"Phiếu trình|Dự thảo 1|Hồ sơ kèm dự thảo 1|...",
+ "vi_tri":"vd: trang 2","trich_dan":"đoạn văn bản gốc liên quan (ngắn)","muc_do":"cao|vua|thap",
  "mo_ta":"vấn đề là gì","de_xuat":"nên sửa thế nào","do_tin":"cao|vua|thap"}
 Nếu không phát hiện vấn đề nào: trả về [].
 
@@ -1759,7 +1771,7 @@ Nếu không phát hiện vấn đề nào: trả về [].
 === NỘI DUNG PHIẾU TRÌNH ===
 {noi_dung_phieu_trinh}
 
-=== NỘI DUNG VĂN BẢN DỰ THẢO ===
+=== NỘI DUNG VĂN BẢN DỰ THẢO (VÀ HỒ SƠ KÈM NẾU CÓ) ===
 {noi_dung_du_thao}
 """
 
@@ -1846,8 +1858,15 @@ def gemini_review(api_key, model, prompt, log=lambda *a: None):
     except Exception:
         raise RuntimeError(f"Không đọc được phản hồi Gemini: {r.text[:400]}")
 
-_AI_NHOM_LABEL = {"chinh_ta": "CHÍNH TẢ / THỂ THỨC", "noi_nhan": "NƠI NHẬN",
-                  "luong_trinh": "LUỒNG TRÌNH"}
+_AI_NHOM_LABEL = {"chinh_ta": "CHÍNH TẢ / THỂ THỨC", "thong_nhat": "THỐNG NHẤT THÔNG TIN",
+                  "noi_nhan": "NƠI NHẬN", "luong_trinh": "LUỒNG TRÌNH"}
+_AI_NHOM_ORDER = ["chinh_ta", "thong_nhat", "noi_nhan", "luong_trinh"]
+
+def _is_gcn_ddkkd(d):
+    """True nếu văn bản dự thảo `d` là Giấy chứng nhận đủ điều kiện kinh doanh (dược) — nhận từ
+    dữ liệu đã có (loại VB app tự nhận + trích yếu app tự điền), không cần dò tìm thêm."""
+    return ((d.get("doc_type") or "").strip().lower() == "giấy chứng nhận"
+            or "đủ điều kiện kinh doanh" in (d.get("abstract") or "").lower())
 
 def parse_ai_findings(raw):
     """Tách mảng JSON findings từ text Gemini trả về (có thể lẫn ```json, chữ thừa, object đơn).
@@ -4037,13 +4056,30 @@ class App(tk.Tk):
             try:
                 phieu_text = read_any_doc_text(report_path) if report_path else ""
                 parts = []
+                notes = []
                 got_any = bool(phieu_text)
                 for idx, d in doc_paths:
                     t = read_any_doc_text(d.get("file_draft_main")) if d.get("file_draft_main") else ""
                     if t:
                         got_any = True
-                    parts.append(f"[DỰ THẢO {idx}] loại='{d.get('doc_type') or '?'}' "
-                                 f"số='{d.get('code') or '?'}'\n{t or '(không đọc được nội dung file)'}")
+                    block = (f"[DỰ THẢO {idx}] loại='{d.get('doc_type') or '?'}' "
+                             f"số='{d.get('code') or '?'}'\n{t or '(không đọc được nội dung file)'}")
+                    # Giấy chứng nhận đủ điều kiện kinh doanh: gửi kèm luôn nội dung "Tài liệu
+                    # thêm" của CHÍNH văn bản đó (= hồ sơ đề nghị cấp phép) để AI đối chiếu.
+                    # KHÔNG gửi tài liệu thêm của phiếu trình.
+                    if _is_gcn_ddkkd(d):
+                        extra_texts = []
+                        for ep in (d.get("files_draft_extra") or []):
+                            et = read_any_doc_text(ep)
+                            if et:
+                                extra_texts.append(f"--- {os.path.basename(ep)} ---\n{et}")
+                        if extra_texts:
+                            block += (f"\n\n[HỒ SƠ KÈM DỰ THẢO {idx}] (hồ sơ đề nghị cấp Giấy chứng "
+                                      f"nhận đủ điều kiện kinh doanh — đối chiếu dự thảo với hồ sơ này)\n"
+                                      + "\n\n".join(extra_texts))
+                            notes.append(f"Dự thảo {idx}: đã gửi kèm {len(extra_texts)} tài liệu hồ sơ "
+                                         f"(Giấy chứng nhận đủ điều kiện kinh doanh)")
+                    parts.append(block)
                 duthao_text = "\n\n".join(parts) if parts else "(không có văn bản dự thảo)"
                 if not got_any:
                     raise RuntimeError("Không bóc được chữ từ file nào (PDF scan không có lớp chữ?). "
@@ -4063,7 +4099,7 @@ class App(tk.Tk):
                 self.after(0, lambda: self._ai_finish_error(
                     "AI trả về không đúng định dạng JSON. Trích đoạn:\n" + snippet))
                 return
-            self.after(0, lambda: self._ai_finish_ok(findings))
+            self.after(0, lambda: self._ai_finish_ok(findings, notes))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -4089,27 +4125,30 @@ class App(tk.Tk):
         self.ai_status.config(text="Rà soát lỗi.", foreground="#c62828")
         self._ai_set_result(msg)
 
-    def _ai_finish_ok(self, findings):
+    def _ai_finish_ok(self, findings, notes=None):
         self._ai_stop_tick()
         secs = int(time.time() - getattr(self, "_ai_t0", time.time()))
         self.ai_status.config(text=f"Xong ({secs}s) · {len(findings)} vấn đề.", foreground="#2e7d32")
-        self._ai_render(findings)
+        self._ai_render(findings, notes)
 
-    def _ai_render(self, findings):
+    def _ai_render(self, findings, notes=None):
         t = self.ai_result
         t.config(state="normal")
         t.delete("1.0", "end")
         ts = datetime.now().strftime("%H:%M")
+        for n in (notes or []):
+            t.insert("end", "ℹ " + n + "\n", "muted")
+        if notes:
+            t.insert("end", "\n", "muted")
         if not findings:
             t.insert("end", f"Rà soát {ts} — ✓ Không phát hiện vấn đề nào.\n\n", "muted")
             t.insert("end", "(AI vẫn có thể bỏ sót — người rà soát tự kiểm tra lại.)\n", "muted")
         else:
             t.insert("end", f"Rà soát {ts} · {len(findings)} vấn đề · độ tin do AI tự đánh giá\n\n", "muted")
-            order = ["chinh_ta", "noi_nhan", "luong_trinh"]
             by = {}
             for f in findings:
                 by.setdefault((f.get("nhom") or "khac"), []).append(f)
-            for nhom in order + [k for k in by if k not in order]:
+            for nhom in _AI_NHOM_ORDER + [k for k in by if k not in _AI_NHOM_ORDER]:
                 items = by.get(nhom) or []
                 if not items:
                     continue
