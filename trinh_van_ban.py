@@ -3369,7 +3369,13 @@ class App(tk.Tk):
         self.login_log.insert("end", msg + "\n"); self.login_log.see("end"); self.update_idletasks()
 
     def _do_login(self):
-        u, p = self.username.get().strip(), self.password.get()
+        # Bấm ĐĂNG NHẬP + gõ Enter (hoặc gõ Enter 2 lần khi sốt ruột) trong lúc lần đăng nhập
+        # trước còn đang chạy: lần thừa chạy sau khi màn đăng nhập đã bị _show_main() xoá →
+        # self.username không còn. Bỏ qua lần thừa thay vì để TclError nổi ra.
+        try:
+            u, p = self.username.get().strip(), self.password.get()
+        except tk.TclError:
+            return
         if not u or not p:
             messagebox.showwarning("Thiếu", "Nhập tên đăng nhập và mật khẩu."); return
         self.btn_login.config(state="disabled")
@@ -4171,6 +4177,7 @@ class App(tk.Tk):
 
     # ---------- MÀN 2: SOẠN & LƯU NHÁP ----------
     def _show_main(self):
+        self._cancel_readiness_loop()   # huỷ vòng cũ trước khi _clear() xoá widget nó đang đọc
         self._clear()
         # Tự tính theo ĐÚNG màn hình đang chạy — không đoán 1 số cố định cho mọi máy (dễ tràn
         # màn hình nhỏ hoặc quá bé so với màn hình lớn). Có trần hợp lý để không quá khổ trên
@@ -4531,6 +4538,14 @@ class App(tk.Tk):
         từng ô. Đồng thời gắn dấu ⚠ lên đúng tab (sidebar) còn thiếu, để biết cần quay lại tab
         nào mà không phải tự dò qua cả 4 tab. Tự cập nhật định kỳ (không cần nối callback riêng
         vào từng ô/luồng/nơi nhận — đơn giản hơn, chi phí không đáng kể)."""
+        # CHỈ giữ 1 vòng: huỷ lịch cũ trước khi lên lịch mới. Hàm này được gọi TRỰC TIẾP từ
+        # nhiều nơi (_show_main, _set_report_mode, _reset_form, _apply_edit_data) — trước đây
+        # mỗi lần gọi lại đẻ thêm 1 vòng after(700) mồ côi chạy song song vĩnh viễn, và khi
+        # giao diện chính bị dựng lại thì các vòng mồ côi đó đọc widget đã bị xoá → TclError
+        # spam ("invalid command name ... .!text").
+        self._cancel_readiness_loop()
+        if not (getattr(self, "report_content", None) and self.report_content.winfo_exists()):
+            return
         missing_by_tab = {"Phiếu trình": [], "Văn bản": [], "Luồng": []}
         if not self.file_report.get():
             missing_by_tab["Phiếu trình"].append("File phiếu trình")
