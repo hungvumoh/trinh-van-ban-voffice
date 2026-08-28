@@ -5063,6 +5063,11 @@ class App(tk.Tk):
         ttk.Label(parent, text=AUTHOR_MARK, font=("", 8), foreground="#999999").pack(
             anchor="e", padx=12, pady=(0, 6))
 
+        # Tự tra cứu lần đầu ngay khi đăng nhập (giống tab "Quản lý Phiếu trình" tự làm mới) —
+        # hoãn qua after() để cửa sổ kịp hiện ra, khi đó _incoming_search mới bật được cửa sổ
+        # chờ "Đang tra cứu văn bản đến…" cho người dùng thấy.
+        self.after(400, self._incoming_search)
+
     def _incoming_clear_filters(self):
         self.inc_code.set("")
         self.inc_publisher.set("")
@@ -5085,18 +5090,24 @@ class App(tk.Tk):
                        doc_code=self.inc_code.get().strip(),
                        publisher_name=self.inc_publisher.get().strip())
         start = self.inc_start
-        dlg = _ConvertingDialog(self, "Đang tra cứu văn bản đến…")
+        # Lúc tự tra cứu ngay khi khởi động ngầm dưới khay (cửa sổ đang ẩn) thì KHÔNG bật cửa sổ
+        # chờ modal — nếu không nó nhấp nháy giữa màn hình dù chương trình "chưa mở".
+        dlg = _ConvertingDialog(self, "Đang tra cứu văn bản đến…") if self.winfo_viewable() else None
+
+        def _close_dlg():
+            if dlg is not None:
+                dlg.close()
 
         def worker():
             try:
                 items, total = search_incoming_docs(
                     s, start=start, count=self.INCOMING_PAGE_SIZE, log=self.log, **filters)
             except Exception as e:
-                self.after(0, dlg.close)
+                self.after(0, _close_dlg)
                 self.after(0, lambda: messagebox.showerror(
                     "Lỗi tra cứu", f"Không tra cứu được văn bản đến:\n{e!r}"))
                 return
-            self.after(0, lambda: (self._apply_incoming_results(items, total), dlg.close()))
+            self.after(0, lambda: (self._apply_incoming_results(items, total), _close_dlg()))
 
         threading.Thread(target=worker, daemon=True).start()
 
