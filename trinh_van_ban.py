@@ -1524,7 +1524,7 @@ PIPELINE_PHASES = [
     ("verify", "Xác minh với hệ thống"),
 ]
 
-def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
+def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None, confirm_dup=None):
     # 2 loại phiếu trình (chọn ở checkbox "Loại phiếu trình", xem _set_report_mode):
     #  - "ban_hanh" (mặc định): mỗi văn bản dự thảo trong cfg["documents"] có file + loại VB/số/
     #    trích yếu RIÊNG — mỗi văn bản upload riêng, onInsertDraft riêng (ra publishDocumentId
@@ -1590,21 +1590,24 @@ def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
                 if report_main and report_main.lower().endswith(".pdf"):
                     log("  › File phiếu trình:")
                     stamped = stamp_signature_numbers(report_main, flow_items, log,
-                                                       stamps=cfg.get("stamps_report_override"))
+                                                       stamps=cfg.get("stamps_report_override"),
+                                                       confirm_dup=confirm_dup)
                     report_files = [stamped] + list(cfg.get("files_report_extra") or [])
                 log("   (Nhóm VĂN BẢN đang dùng tạm file phiếu trình để thử — không đánh số riêng.)")
             else:
                 if report_main and report_main.lower().endswith(".pdf"):
                     log("  › File phiếu trình:")
                     stamped = stamp_signature_numbers(report_main, flow_items, log,
-                                                       stamps=cfg.get("stamps_report_override"))
+                                                       stamps=cfg.get("stamps_report_override"),
+                                                       confirm_dup=confirm_dup)
                     report_files = [stamped] + list(cfg.get("files_report_extra") or [])
                 for i, doc in enumerate(documents):
                     main = doc.get("file_draft_main")
                     if main and main.lower().endswith(".pdf"):
                         log(f"  › Văn bản {i+1}/{n_docs}: {os.path.basename(main)}")
                         stamped = stamp_signature_numbers(main, flow_items, log,
-                                                           stamps=doc.get("stamps_override"))
+                                                           stamps=doc.get("stamps_override"),
+                                                           confirm_dup=confirm_dup)
                         doc["_files"] = [stamped] + list(doc.get("files_draft_extra") or [])
 
     phase_cb("upload")
@@ -2604,7 +2607,18 @@ def _clear_old_signature_stamps(doc, log):
     if removed:
         log(f"   • Đã xoá {removed} số chữ ký cũ (đánh số lại từ đầu theo luồng hiện tại).")
 
-def stamp_signature_numbers(path, flow_items, log, stamps=None):
+def _has_duplicate_stamp_numbers(stamps):
+    """True nếu có số nào xuất hiện từ 2 lần trở lên trong `stamps` (detector tự quét đôi khi
+    hơi nhạy, bắt trùng 1 chức danh ở 2 chỗ — VD lặp trong danh sách 'Nơi nhận'/tiêu đề lặp)."""
+    seen = set()
+    for st in stamps:
+        n = st["number"]
+        if n in seen:
+            return True
+        seen.add(n)
+    return False
+
+def stamp_signature_numbers(path, flow_items, log, stamps=None, confirm_dup=None):
     """Đọc 1 file PDF (phiếu trình hoặc dự thảo văn bản), tìm vị trí ký theo luồng, ghi
     chú thích (Text annot) số thứ tự. Lưu bản đã đánh số vào 1 thư mục tạm riêng, GIỮ NGUYÊN
     TÊN gốc (file gốc giữ nguyên, không sửa/không ghi đè). Trả về đường dẫn để upload —
@@ -2626,18 +2640,19 @@ def stamp_signature_numbers(path, flow_items, log, stamps=None):
             log("   ⚠ Không tìm thấy vị trí ký nào trong file — giữ nguyên file gốc, không đánh số.")
             return path
 
-        by_number = {}
-        for st in stamps:
-            by_number.setdefault(st["number"], []).append(st)
-        dups = {n: v for n, v in by_number.items() if len(v) > 1}
-        if dups:
-            detail = "; ".join(
-                f"số {n} lặp {len(v)} lần (trang {', '.join(str(x['page']+1) for x in v)}, "
-                f"chức danh: {', '.join(x['title'] for x in v)})"
-                for n, v in dups.items())
-            raise PipelineError(
-                f"Phát hiện TRÙNG số chữ ký trong file (1 file không được trùng số) — "
-                f"dừng lại để kiểm tra tay: {detail}")
+        if _has_duplicate_stamp_numbers(stamps):
+            by_number = {}
+            for st in stamps:
+                by_number.setdefault(st["number"], []).append(st)
+            dup_numbers = ", ".join(str(n) for n, v in sorted(by_number.items()) if len(v) > 1)
+            msg = (f"Phát hiện trùng lặp chữ ký trong file (số {dup_numbers} xuất hiện nhiều hơn "
+                   f"1 lần). Bạn có tiếp tục muốn trình không?")
+            log(f"   ⚠ {msg}")
+            # confirm_dup(msg) -> bool: nơi gọi tự hiện hộp Có/Không (đồng bộ — CHẶN thread nền
+            # này tới khi người dùng bấm, xem run_pipeline) — không tự bỏ/tự chọn gì ở đây, chỉ
+            # hỏi. Không có confirm_dup (không qua giao diện) thì mặc định HUỶ (an toàn).
+            if not (confirm_dup(msg) if confirm_dup else False):
+                raise PipelineError("Đã huỷ vì phát hiện trùng lặp chữ ký trong file.")
 
         expected_max = max((n.get("order") for n in flow_items if n.get("actionType") in (1, 4, 5)),
                             default=None)
@@ -4948,9 +4963,20 @@ class App(tk.Tk):
             self.logbox.delete("1.0", "end")
             self.log("=== BẮT ĐẦU XỬ LÝ (CHỈ KIỂM TRA) ===")
             s = self.session
+            def _confirm_dup(msg):
+                # Đồng bộ: hiện hộp Có/Không trên thread chính rồi CHẶN thread nền này tới khi
+                # người dùng bấm — xem stamp_signature_numbers/run_pipeline.
+                result = {}
+                event = threading.Event()
+                def ask():
+                    result["ok"] = messagebox.askyesno("Trùng số chữ ký", msg)
+                    event.set()
+                self.after(0, ask)
+                event.wait()
+                return result.get("ok", False)
             def worker():
                 try:
-                    run_pipeline(s, cfg, self.log, check_only=True)
+                    run_pipeline(s, cfg, self.log, check_only=True, confirm_dup=_confirm_dup)
                 except PipelineError as e:
                     self.log("\n✖ DỪNG: " + str(e))
                 except Exception as e:
@@ -6668,6 +6694,10 @@ class PreviewWindow(tk.Toplevel):
             try:
                 d = fitz.open(path)
                 try:
+                    # Chỉ quét để HIỂN THỊ — hiện đúng những gì quét được, kể cả trùng số (người
+                    # dùng tự thấy trên khung Xem trước, tự sửa bằng kéo/xoá dấu nếu cần). Việc
+                    # hỏi "có tiếp tục không" khi thật sự trùng chỉ hỏi ở bước Trình thật (xem
+                    # stamp_signature_numbers/run_pipeline) — không hỏi lặp lại ở đây.
                     stamps = find_signature_stamps(d, self.cfg.get("flow_nodes_override"), self._plog)
                 finally:
                     d.close()
@@ -6929,9 +6959,22 @@ class PreviewWindow(tk.Toplevel):
         def phase_cb(key):
             self.after(0, lambda k=key: self._set_phase(k))
 
+        def _confirm_dup(msg):
+            # Đồng bộ: hiện hộp Có/Không trên thread chính rồi CHẶN thread nền này tới khi người
+            # dùng bấm — xem stamp_signature_numbers/run_pipeline.
+            result = {}
+            event = threading.Event()
+            def ask():
+                result["ok"] = messagebox.askyesno("Trùng số chữ ký", msg)
+                event.set()
+            self.after(0, ask)
+            event.wait()
+            return result.get("ok", False)
+
         def worker():
             try:
-                result = run_pipeline(self.session, cfg, self._plog, check_only=False, phase_cb=phase_cb)
+                result = run_pipeline(self.session, cfg, self._plog, check_only=False,
+                                       phase_cb=phase_cb, confirm_dup=_confirm_dup)
             except PipelineError as e:
                 err_text = str(e)   # tính ngay trong khối except — "e" bị Python xoá khi except kết thúc
                 self._plog("\n✖ DỪNG: " + err_text)
