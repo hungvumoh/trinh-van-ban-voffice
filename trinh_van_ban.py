@@ -2994,6 +2994,12 @@ class FileList(ttk.Frame):
         """Tương thích ngược cho chỗ nào còn gọi .get() kiểu cũ — trả đúng get_local()."""
         return self.get_local()
 
+    def get_all(self):
+        """TOÀN BỘ dòng (local + existing) theo đúng thứ tự đang hiển thị — cho khung Xem trước
+        (PreviewWindow._build_tree) liệt kê CẢ file chưa có local (existing, có 'fetch_fn') lẫn
+        file local, thay vì chỉ mỗi get_local(). Trả bản sao — không cho sửa ngược lại self.items."""
+        return list(self.items)
+
     def clear(self):
         self.items = []
         self._removed_ids = []
@@ -3153,6 +3159,9 @@ class DocumentSection(ttk.LabelFrame):
             "abstract": self.abstract.get("1.0", "end-1c"),
             "file_draft_main": self.file_draft.get(),
             "files_draft_extra": self.extra.get_local(),
+            # Danh sách ĐẦY ĐỦ (local + existing) — chỉ dùng để khung Xem trước liệt kê file,
+            # KHÔNG dùng cho run_pipeline (vẫn dùng files_draft_extra ở trên).
+            "files_draft_extra_all": self.extra.get_all(),
             # Tài liệu gửi kèm ĐÃ CÓ trên server, không đụng tới (giữ) hoặc bị bấm "Xoá file"
             # (cần removeFile.do) — xem FileList/run_pipeline.
             "_extra_kept_ids": self.extra.get_kept_ids(),
@@ -4782,6 +4791,9 @@ class App(tk.Tk):
             "auto_stamp": self.auto_stamp_var.get(),
             "file_report_main": self.file_report.get(),
             "files_report_extra": self.extra_report.get_local(),
+            # Danh sách ĐẦY ĐỦ (local + existing) — chỉ dùng để khung Xem trước liệt kê file,
+            # KHÔNG dùng cho run_pipeline (vẫn dùng files_report_extra ở trên).
+            "files_report_extra_all": self.extra_report.get_all(),
             # Tài liệu thêm CỦA PHIẾU TRÌNH đã có trên server, giữ nguyên hoặc bị "Xoá file"
             # (xem FileList/run_pipeline — cùng cơ chế với văn bản, DocumentSection.get()).
             "report_extra_kept_ids": self.extra_report.get_kept_ids(),
@@ -6411,7 +6423,11 @@ class PreviewWindow(tk.Toplevel):
         self._mark_items = {}       # idx -> (oval_id, text_id)
         self._drag_idx = None
         self._drag_last = None
-        self._tree_paths = {}       # iid -> (path, kind)
+        # iid -> entry dict {"path","kind"} (file local, xem ngay) hoặc
+        # {"name","kind","fetch_fn","existing":True,"_cached_path"} (file "đã có trên hệ thống,
+        # giữ nguyên" — chưa có local, bấm vào mới tải, xem _select_entry).
+        self._tree_paths = {}
+        self._select_seq = 0        # chống đè: bấm sang file khác trong lúc file trước đang tải
         self._sending = False       # True trong lúc luồng nền đang Lưu/Trình — chặn đóng cửa
                                      # sổ "lặng lẽ" giữa chừng (xem _on_close)
         self._submitted_ok = False  # True nếu đã Lưu/Trình THÀNH CÔNG ít nhất 1 lần — báo
@@ -6498,8 +6514,8 @@ class PreviewWindow(tk.Toplevel):
                 self._ensure_scanned(dm)
 
         init_path = next((dm for dm in draft_mains if dm), None) or report_main
-        for iid, (p, k) in self._tree_paths.items():
-            if p == init_path:
+        for iid, e in self._tree_paths.items():
+            if e.get("path") == init_path:
                 self.tree.selection_set(iid); self.tree.see(iid)
                 break
 
@@ -6563,35 +6579,124 @@ class PreviewWindow(tk.Toplevel):
 
         def add_group(title, entries):
             gid = self.tree.insert("", "end", text=title, open=True)
-            for path, kind in entries:
-                if not path:
-                    continue
-                iid = self.tree.insert(gid, "end", text=os.path.basename(path))
-                self._tree_paths[iid] = (path, kind)
+            for e in entries:
+                if e.get("existing"):
+                    # File "đã có trên hệ thống, giữ nguyên" (xem FileList.add_existing) — CHƯA
+                    # có local, chỉ tải khi thật sự bấm vào (xem _select_entry) — nhãn ☁ để phân
+                    # biệt bằng mắt với file local (xem ngay được).
+                    iid = self.tree.insert(gid, "end", text="☁ " + (e.get("name") or "(không rõ tên)"))
+                    self._tree_paths[iid] = e
+                else:
+                    path = e.get("path")
+                    if not path:
+                        continue
+                    iid = self.tree.insert(gid, "end", text=os.path.basename(path))
+                    self._tree_paths[iid] = {"path": path, "kind": e["kind"]}
+
+        def _extra_entries(extra_all, kind):
+            """Trộn chung file local (đã có path) + file 'existing' (chưa có, kèm fetch_fn) vào
+            CÙNG 1 danh sách hiển thị, theo đúng thứ tự trong khung "+ Tài liệu gửi kèm" — không
+            tách nhóm riêng (xem thảo luận: trước đây tách nhóm, giờ gộp chung cho dễ nhìn)."""
+            out = []
+            for it in extra_all or []:
+                if it["kind"] == "existing":
+                    out.append({"kind": kind, "existing": True,
+                                 "name": it.get("name"), "fetch_fn": it.get("fetch_fn")})
+                else:
+                    out.append({"kind": kind, "path": it.get("path")})
+            return out
 
         add_group("📄 PHIẾU TRÌNH (không gửi đi)",
-                   [(cfg.get("file_report_main"), "report_main")] +
-                   [(p, "report_extra") for p in (cfg.get("files_report_extra") or [])])
+                   [{"path": cfg.get("file_report_main"), "kind": "report_main"}] +
+                   _extra_entries(cfg.get("files_report_extra_all"), "report_extra"))
         documents = cfg.get("documents") or []
         n_docs = len(documents)
         for i, doc in enumerate(documents):
             title = f"📤 VĂN BẢN {i+1}/{n_docs} (gửi đi)" if n_docs > 1 else "📤 VĂN BẢN (gửi đi)"
             add_group(title,
-                      [(doc.get("file_draft_main"), f"draft_main:{i}")] +
-                      [(p, f"draft_extra:{i}") for p in (doc.get("files_draft_extra") or [])])
+                      [{"path": doc.get("file_draft_main"), "kind": f"draft_main:{i}"}] +
+                      _extra_entries(doc.get("files_draft_extra_all"), f"draft_extra:{i}"))
 
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         ttk.Label(parent, foreground="gray", wraplength=320, justify="left",
                   text="PDF của Phiếu trình/Dự thảo: kéo dấu để di chuyển, nhấp đúp để sửa số/xoá, "
                        "bấm '➕ Thêm dấu' rồi nhấp vào trang để thêm. File khác/PDF phụ: bấm để mở "
-                       "thư mục chứa file.").pack(anchor="w", pady=(6, 0))
+                       "thư mục chứa file. File ☁ (đã có trên hệ thống): bấm vào để tải rồi xem "
+                       "(hơi lâu hơn 1 chút, có hiện 'Đang tải…').").pack(anchor="w", pady=(6, 0))
 
     def _on_tree_select(self, _e):
         sel = self.tree.selection()
         if not sel or sel[0] not in self._tree_paths:
             return
-        path, kind = self._tree_paths[sel[0]]
-        self._select_file(path, kind)
+        entry = self._tree_paths[sel[0]]
+        self._select_entry(entry)
+
+    def _select_entry(self, entry):
+        """Dòng cây vừa chọn — file LOCAL thì xem ngay (as trước); file "existing" (đã có trên
+        hệ thống, chưa có local) thì tải rồi mới xem, có hiện 'Đang tải…' trong lúc chờ; tải
+        xong thì CACHE lại path tạm ngay trên entry — bấm lại lần 2 mở tức thì, không tải lại."""
+        if not entry.get("existing"):
+            self._select_file(entry.get("path"), entry.get("kind"))
+            return
+        cached = entry.get("_cached_path")
+        if cached:
+            self._select_file(cached, entry["kind"])
+            return
+        fetch_fn = entry.get("fetch_fn")
+        name = entry.get("name") or "(không rõ tên)"
+        if not fetch_fn:
+            messagebox.showwarning("Chưa xem được",
+                                    "Thiếu thông tin để tải file này.", parent=self)
+            return
+        self._select_seq += 1
+        seq = self._select_seq
+        self._show_loading_state(name)
+        dest = os.path.join(_new_gen_tmpdir("voffice_preview_"), name)
+        def worker():
+            try:
+                fetch_fn(dest)
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: self._on_entry_fetch_failed(seq, name, err))
+                return
+            self.after(0, lambda: self._on_entry_fetch_done(seq, entry, dest))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_entry_fetch_done(self, seq, entry, dest):
+        if seq != self._select_seq:
+            return   # đã bấm sang dòng khác trong lúc tải — bỏ kết quả cũ, không đè lên màn đang xem
+        entry["_cached_path"] = dest
+        self._select_file(dest, entry["kind"])
+
+    def _on_entry_fetch_failed(self, seq, name, err):
+        if seq != self._select_seq:
+            return
+        self._show_error_state(f"Không tải được '{name}':\n{err}")
+
+    def _close_current_doc(self):
+        if self._current_doc is not None:
+            try: self._current_doc.close()
+            except Exception: pass
+        self._current_doc = None
+        self._current_path = None
+
+    def _show_loading_state(self, name):
+        self._close_current_doc()
+        self.canvas.delete("all")
+        self._page_img = None
+        self.canvas.create_text(16, 16, anchor="nw", fill="white",
+                                 text=f"Đang tải để xem: {name}…", font=("", 11))
+        self.page_var.set("Đang tải…")
+        self.btn_addmark.config(state="disabled")
+
+    def _show_error_state(self, msg):
+        self._close_current_doc()
+        self.canvas.delete("all")
+        self._page_img = None
+        self.canvas.create_text(16, 16, anchor="nw", fill="#ff8a80", text=msg,
+                                 font=("", 11), width=560)
+        self.page_var.set("Lỗi")
+        self.btn_addmark.config(state="disabled")
 
     # ---------- Phải: khung xem PDF ----------
     def _build_viewer(self, parent):
