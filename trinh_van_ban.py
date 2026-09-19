@@ -790,7 +790,12 @@ def _lienthong_roots(s, log):
     return [(str(n.get("id")), n.get("name", "")) for n in items if n.get("id") is not None]
 
 def resolve_node(s, node, tree, log):
-    """node={'name','path'}; tree='internal'|'lien_thong'. Trả về ID (đi cây, có cache)."""
+    """node={'name','path'}; tree='internal'|'lien_thong'. Trả về ID (đi cây, có cache).
+    Nếu `node` đã có sẵn 'id' (đọc thẳng từ onEditDraft.do lúc Sửa 1 văn bản đã có — xem
+    fetch_doc_recipients_exact) thì dùng LUÔN, khỏi đi cây — đây là ID THẬT server đã lưu, chính
+    xác hơn dò theo tên (xác nhận qua HAR 'thử nơi nhận 3.har')."""
+    if node.get("id"):
+        return node["id"]
     path = node["path"]
     key = tree + "|" + " > ".join(path)
     if key in ID_CACHE:
@@ -1272,6 +1277,60 @@ def fetch_edit_draft_upload_url(s, publish_document_id, log=lambda *a: None):
     if not urls:
         raise PipelineError(f"Không thấy URL upload trong form Sửa (publishDocumentId={publish_document_id}).")
     return urls.get("uploadDraftFile") or list(urls.values())[-1]
+
+# 5 nhóm Nơi nhận app đang hỗ trợ (khớp đúng key "recv_*"/RecipientBox.CATS) -> tên field trong
+# form onEditDraft.do (publishDocumentCreateForm.receive<Base>/...receive<Base>Id).
+RECEIVE_CATS = [("inside", "receiveInside"), ("report", "receiveReport"),
+                ("edoc", "receiveEdoc"), ("save", "receiveSaveDepartment"),
+                ("know", "receiveToKnow")]
+
+def _parse_input_value(html_text, field_name):
+    """Đọc value="..." của 1 <input> theo đúng id. ƯU TIÊN dạng có tiền tố
+    "publishDocumentCreateForm.xxx" — xác nhận qua HAR thật ('thử nơi nhận 3.har'): riêng
+    receiveSaveDepartmentId có TỚI 2 input cùng lúc, 1 cái id KHÔNG tiền tố luôn RỖNG (thuộc
+    widget khác trên trang) đứng TRƯỚC cái có tiền tố mới là ô chứa giá trị thật — nếu chỉ lấy
+    match đầu tiên sẽ ăn nhầm ô rỗng. Chỉ rơi về dạng không tiền tố khi không có bản có tiền tố.
+    Trả '' nếu không thấy."""
+    fallback = None
+    for m in re.finditer(r'<input\b[^>]*>', html_text):
+        tag = m.group(0)
+        idm = re.search(r'\bid="([^"]*)"', tag)
+        if not idm:
+            continue
+        fid = idm.group(1)
+        if fid == "publishDocumentCreateForm." + field_name:
+            vm = re.search(r'\bvalue="([^"]*)"', tag)
+            return html_unescape(vm.group(1)) if vm else ""
+        if fid == field_name and fallback is None:
+            vm = re.search(r'\bvalue="([^"]*)"', tag)
+            fallback = html_unescape(vm.group(1)) if vm else ""
+    return fallback or ""
+
+def fetch_doc_recipients_exact(s, publish_document_id, log=lambda *a: None):
+    """Đọc lại CHÍNH XÁC Nơi nhận đã lưu của 1 văn bản đã có — từ chính HTML onEditDraft.do (đã
+    render sẵn value= cho từng ô, GỒM CẢ receive*Id) — xác nhận qua HAR thật 'thử nơi nhận 3.har':
+    trong khi onSearchDocumentOfReport.do (dùng cho _fill_recipients_best_effort) luôn trả
+    receiveInsideId/receiveSaveDepartmentId = null dù có tên, thì chính onEditDraft.do lại có đủ
+    ID thật cho TẤT CẢ nhóm — vì đây là ID server đã lưu thật lúc Trình, không phải đoán lại theo
+    tên. Trả {cat: [{'name','id','path':[name]}, ...]} — CHỈ gồm tên đã khớp được ID; tên thiếu ID
+    (hiếm) không có trong kết quả, nơi gọi tự rơi về khớp gần đúng theo tên (search_nodes) cho
+    riêng tên đó — không làm mất/sai tên nào, chỉ bớt chỗ phải đoán."""
+    try:
+        r = s.post(BASE + "/voPublishDocument!onEditDraft.do",
+                   params={"publishDocumentId": publish_document_id, "moduleCall": "reportForm"},
+                   data={"dojo.preventCache": now_ms()}, timeout=30)
+    except Exception as e:
+        log(f"   • Không đọc được Nơi nhận chính xác (publishDocumentId={publish_document_id}): {e!r}")
+        return {}
+    out = {}
+    for cat, base in RECEIVE_CATS:
+        names = [n.strip() for n in _parse_input_value(r.text, base).split(";") if n.strip()]
+        ids = [i.strip() for i in _parse_input_value(r.text, base + "Id").split(";") if i.strip()]
+        nodes = [{"name": name, "id": ids[i], "path": [name]}
+                 for i, name in enumerate(names) if i < len(ids) and ids[i]]
+        if nodes:
+            out[cat] = nodes
+    return out
 
 def fetch_draft_attach_tokens(s, publish_document_id, log=lambda *a: None):
     """Token tải file cho từng file đính kèm của 1 văn bản đã có — xác nhận qua HAR thật ('har
@@ -5468,6 +5527,10 @@ class App(tk.Tk):
                     # Tài liệu gửi kèm PHỤ đã có trên server, GIỮ NGUYÊN — chỉ điền khi mode
                     # "edit" (xem nhánh else dưới); mode "copy" luôn tải về máy như cũ.
                     "extra_existing": [],
+                    # Nơi nhận CHÍNH XÁC (có ID thật, không đoán) — đọc từ onEditDraft.do, dùng
+                    # cho cả mode "edit" lẫn "copy" (chỉ là ĐỌC, không đụng gì tới văn bản gốc) —
+                    # xem fetch_doc_recipients_exact/_fill_recipients_best_effort.
+                    "recv_exact": fetch_doc_recipients_exact(s, pid, self.log) if pid else {},
                 }
                 main_file = next((a for a in own_files if a.get("documentAbstract")), None) or \
                     (own_files[0] if own_files else None)
@@ -5636,9 +5699,13 @@ class App(tk.Tk):
         return True
 
     def _fill_recipients_best_effort(self, ds, doc):
-        """Điền lại Nơi nhận của ĐÚNG văn bản `ds` từ TÊN (không có ID) bằng khớp gần nhất trong
-        cây đơn vị — best effort, giống triết lý "tự điền chỉ để đỡ gõ tay" đã ghi trong
+        """Điền lại Nơi nhận của ĐÚNG văn bản `ds` — ƯU TIÊN dùng thẳng ID CHÍNH XÁC đã đọc từ
+        onEditDraft.do (`doc['recv_exact']`, xem fetch_doc_recipients_exact/_start_reuse_report):
+        đây là ID THẬT server đã lưu, KHÔNG phải đoán. Tên nào không có trong đó (phiếu cũ hơn
+        tính năng này, hoặc onEditDraft.do đọc lỗi) mới rơi về khớp gần nhất theo tên trong cây
+        đơn vị — best effort, giống triết lý "tự điền chỉ để đỡ gõ tay" đã ghi trong
         HUONG_DAN.md. Luôn tự kiểm tra lại trước khi bấm CHẠY."""
+        exact = doc.get("recv_exact") or {}
         cat_field_tree = [
             ("inside", "receive_inside", CAY["internal"]["nodes"]),
             ("report", "receive_report", CAY["internal"]["nodes"]),
@@ -5647,8 +5714,15 @@ class App(tk.Tk):
             ("edoc", "receive_edoc", CAY["lien_thong"]["nodes"]),
         ]
         for cat, field, nodes in cat_field_tree:
+            exact_nodes = exact.get(cat) or []
+            for nd in exact_nodes:
+                if not any(_node_key(x) == _node_key(nd) for x in ds.recip.buckets[cat]):
+                    ds.recip.buckets[cat].append(nd)
+            exact_names = {n["name"] for n in exact_nodes}
             names = [n.strip() for n in (doc.get(field) or "").split(";") if n.strip()]
             for name in names:
+                if name in exact_names:
+                    continue   # đã có ID chính xác ở trên — khỏi đoán lại
                 matches = search_nodes(name, nodes, self.store, k=1)
                 if matches:
                     nd = matches[0]
