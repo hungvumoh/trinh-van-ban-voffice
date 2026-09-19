@@ -552,6 +552,19 @@ def upload_many(s, url, paths, log):
     main = ids[0] if ids else ""
     return attach, main
 
+def append_kept_ids(attach, kept_ids):
+    """Cộng thêm attachId của các "Tài liệu gửi kèm/thêm" ĐÃ CÓ trên server mà người dùng GIỮ
+    NGUYÊN (không xoá, không thay) vào chuỗi attachId vừa upload — đúng cơ chế web thật: mỗi ô
+    file là 1 danh sách ID nối ';', ID cũ không bị đụng tới thì cứ nằm nguyên trong danh sách,
+    không cần tải/xoá/upload lại (xem FileList.get_kept_ids/run_pipeline)."""
+    # ép str(): draftDocumentId từ getAttachs.do (JSON) là int, không phải str — join() sau
+    # đây sẽ ném TypeError nếu để nguyên kiểu int (đã gặp thật, xem báo lỗi "Tải văn bản lên
+    # hệ thống" / TypeError sequence item 0: expected str instance, int found).
+    kept_ids = [str(i) for i in (kept_ids or []) if i]
+    if not kept_ids:
+        return attach
+    return (attach or "") + ";".join(kept_ids) + ";"
+
 def reload_token(s, log):
     log("• Xin token mới (reloadToken)…")
     r = s.get(BASE + "/token!reloadToken.do", params={"dojo.preventCache": now_ms()}, timeout=30)
@@ -1294,6 +1307,19 @@ def download_attach(s, url_or_path, dest_path, log=lambda *a: None):
     log(f"   → Đã tải file cũ về: {dest_path}")
     return dest_path
 
+def fetch_doc_existing_attach(s, publish_document_id, attach_id, dest_path, log=lambda *a: None):
+    """Tải 1 file "Tài liệu gửi kèm" ĐÃ CÓ trên server của 1 văn bản, để XEM (double-click trong
+    khung FileList của form Sửa — xem FileList._view_existing) — KHÔNG liên quan gì tới luồng
+    Lưu/Trình (xem run_pipeline): đây là hành động đọc thuần tuý, tải xong không đụng gì tới
+    pipeline upload/removeFile. Luôn xin TOKEN MỚI ngay lúc xem (không giữ token cũ từ lúc mở
+    form Sửa — token có thể hết hạn nếu người dùng sửa lâu mới bấm xem)."""
+    tokens = {str(k): v for k, v in (fetch_draft_attach_tokens(s, publish_document_id, log) or {}).items()}
+    info = tokens.get(str(attach_id))
+    if not info:
+        raise PipelineError(f"Không tìm được token tải file (attachId={attach_id}) — thử lại sau.")
+    url = f"{BASE}/uploadiframe!openFile.do?token={info['token']}&attachId={attach_id}"
+    return download_attach(s, url, dest_path, log)
+
 def open_file_with_default_app(path):
     """Mở 1 file bằng ứng dụng mặc định của hệ điều hành (PDF reader, Word...) — dùng cho nút
     "Mở" ở khung Chi tiết phiếu trình (xem ReportDetailWindow._open_attach). Ném lỗi ra ngoài
@@ -1525,6 +1551,9 @@ def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
     phase_cb("upload")
     with step(log, nn(), total, f"Upload nhóm PHIẾU TRÌNH ({len(report_files)} file) → lấy ID"):
         report_attach, report_sign = upload_many(s, url_report, report_files, log)
+        # Tài liệu thêm ĐÃ CÓ trên server mà người dùng giữ nguyên (không xoá) — cộng thẳng ID
+        # cũ vào, KHÔNG tải/upload lại (xem append_kept_ids/FileList).
+        report_attach = append_kept_ids(report_attach, cfg.get("report_extra_kept_ids"))
         log(f"   attachId={report_attach}  (ký: {report_sign})")
 
     for i, doc in enumerate(documents):
@@ -1536,6 +1565,7 @@ def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
             existing_pid = doc.get("_existing_pid")
             doc_upload_url = fetch_edit_draft_upload_url(s, existing_pid, log) if existing_pid else url_draft
             attach, sign = upload_many(s, doc_upload_url, doc["_files"], log)
+            attach = append_kept_ids(attach, doc.get("_extra_kept_ids"))
             doc["_attach"], doc["_sign"] = attach, sign
             log(f"   attachDraftId={attach}  (ký: {sign})")
 
@@ -1553,7 +1583,10 @@ def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
             # càng Sửa/Trình lại nhiều lần văn bản càng tích file trùng lặp (xác nhận qua HAR
             # thật — xem remove_attach_file). CHỈ chạy ở đây (sau khi check_only đã return phía
             # trên) — đây là bước ghi/xoá thật.
-            for old_id in doc.get("_existing_attach_ids") or []:
+            # "_existing_attach_ids" giờ chỉ còn ID file CHÍNH cũ (luôn bị thay khi Sửa);
+            # "_extra_removed_ids" là ID tài liệu PHỤ bị người dùng chủ động bấm "Xoá file" —
+            # tài liệu phụ nào KHÔNG bị xoá thì không xuất hiện ở đây, không hề bị đụng tới.
+            for old_id in (doc.get("_existing_attach_ids") or []) + (doc.get("_extra_removed_ids") or []):
                 remove_attach_file(s, old_id, log)
             doc["_pid"] = save_document(s, cfg, doc, doc["_attach"], doc["_sign"], log,
                                          existing_pid=doc.get("_existing_pid"))
@@ -1568,7 +1601,10 @@ def run_pipeline(s, cfg, log, check_only=False, phase_cb=lambda key: None):
         # Sửa phiếu trình đã có (report_id) — xoá file CŨ của chính phiếu trình trước khi lưu,
         # cùng lý do với file văn bản ở trên (reportForm.attachId cũng là danh sách nối ';').
         if cfg.get("report_id"):
-            for old_id in cfg.get("report_existing_attach_ids") or []:
+            # Cùng nguyên tắc với văn bản ở trên: "report_existing_attach_ids" giờ chỉ còn ID
+            # file CHÍNH cũ; "report_extra_removed_ids" là tài liệu thêm bị chủ động bấm "Xoá
+            # file" — tài liệu thêm nào giữ nguyên thì không nằm trong danh sách xoá này.
+            for old_id in (cfg.get("report_existing_attach_ids") or []) + (cfg.get("report_extra_removed_ids") or []):
                 remove_attach_file(s, old_id, log)
         save_report_draft(s, cfg, report_attach, report_sign, documents, log, sign=submit_sign,
                            report_id=cfg.get("report_id"))
@@ -2738,52 +2774,155 @@ class RecipientBox(ttk.LabelFrame):
 
 
 class FileList(ttk.Frame):
-    """Danh sách file: nút thêm + listbox + nút bỏ. get() -> [đường dẫn].
+    """Danh sách file: nút thêm + listbox + nút bỏ.
     Listbox tự giãn chiều cao theo đúng số file đang có (tối thiểu MIN_HEIGHT, tối đa
     MAX_HEIGHT dòng) — bộ trình có nhiều file thì thấy hết luôn, không bị cắt còn 2 dòng như
-    trước; quá MAX_HEIGHT thì để phần cuộn của cả tab (_make_scrollable) lo tiếp."""
+    trước; quá MAX_HEIGHT thì để phần cuộn của cả tab (_make_scrollable) lo tiếp.
+
+    Chứa 2 LOẠI dòng khác hẳn nhau (xác nhận qua HAR thật 'sửa nháp.har' — sửa phiếu mà không
+    đụng file thì KHÔNG hề có removeFile.do/upload nào, ngược hẳn 'thay file.har'):
+    - "local": file trên MÁY, chưa có trên server — sẽ được upload khi bấm CHẠY.
+    - "existing": file ĐÃ CÓ trên server (nạp qua add_existing() lúc Sửa 1 phiếu cũ) — KHÔNG
+      tải về máy, KHÔNG upload lại nếu người dùng không đụng tới; bấm "Xoá file" trên dòng này
+      chỉ ĐÁNH DẤU sẽ gọi removeFile.do khi Chạy (xem get_removed_ids()), không xoá gì ngay.
+    Đây là điểm khác trước: trước đây "Sửa" tự tải hết mọi file cũ về máy rồi Chạy sẽ xoá+upload
+    lại TOÀN BỘ — nếu 1 file tải về lỗi (mạng chập chờn…) thì bị xoá khỏi server mà không có gì
+    thay thế. Giờ file "existing" không đụng tới thì tuyệt đối không có nguy cơ đó.
+
+    Bấm ĐÚP (double-click) 1 dòng để XEM: dòng "local" mở thẳng file trên máy (tức thì); dòng
+    "existing" mới TẢI ĐÚNG LÚC ĐÓ (qua `fetch_fn` truyền vào add_existing — xem
+    ReportDetailWindow._open_attach, cùng cơ chế: tải vào thư mục tạm dùng-xong-bỏ rồi mở, KHÔNG
+    đụng gì tới luồng Lưu/Trình/xoá — nếu không truyền fetch_fn thì dòng đó chỉ xem được tên."""
     MIN_HEIGHT = 2
     MAX_HEIGHT = 12
 
     def __init__(self, parent, label):
         super().__init__(parent)
         self.pack(fill="x", pady=2)
-        self.paths = []
+        self.items = []          # [{"kind":"local","path"} | {"kind":"existing","attach_id","name","fetch_fn"}]
+        self._removed_ids = []   # attachId của dòng "existing" đã bị bấm "Xoá file"
         top = ttk.Frame(self); top.pack(fill="x")
         ttk.Label(top, text=label, width=22).pack(side="left")
         ttk.Button(top, text="Thêm file…", command=self._add).pack(side="left")
         ttk.Button(top, text="Xoá file", command=self._remove).pack(side="left", padx=4)
         self.lb = tk.Listbox(self, height=self.MIN_HEIGHT)
         self.lb.pack(fill="x", padx=(0, 0))
+        self.lb.bind("<Double-Button-1>", self._on_double_click)
+
+    def _label_for(self, item):
+        return ("[Đã có trên hệ thống — bấm đúp để xem] " + item["name"]) if item["kind"] == "existing" \
+            else os.path.basename(item["path"])
 
     def _resize(self):
-        self.lb.config(height=max(self.MIN_HEIGHT, min(len(self.paths), self.MAX_HEIGHT)))
+        self.lb.config(height=max(self.MIN_HEIGHT, min(len(self.items), self.MAX_HEIGHT)))
 
     def _add(self):
         ps = filedialog.askopenfilenames(filetypes=[("PDF", "*.pdf"), ("Tất cả", "*.*")])
         for p in ps:
-            if p not in self.paths:
-                self.paths.append(p); self.lb.insert("end", os.path.basename(p))
+            if not any(it["kind"] == "local" and it["path"] == p for it in self.items):
+                self.items.append({"kind": "local", "path": p})
+                self.lb.insert("end", self._label_for(self.items[-1]))
         self._resize()
 
     def _remove(self):
         sel = list(self.lb.curselection())
         for i in reversed(sel):
-            self.lb.delete(i); del self.paths[i]
+            item = self.items[i]
+            if item["kind"] == "existing":
+                # Không xoá gì ngay — chỉ ghi nhớ để run_pipeline gọi removeFile.do lúc Chạy
+                # (xem get_removed_ids()/run_pipeline).
+                self._removed_ids.append(item["attach_id"])
+            self.lb.delete(i); del self.items[i]
         self._resize()
 
     def add_path(self, p):
-        """Thêm 1 đường dẫn từ NGOÀI (vd _apply_edit_data khi Sửa) — khác _add() ở chỗ không tự
-        mở hộp thoại chọn file, chỉ nạp sẵn + tự giãn chiều cao như _add()."""
-        if p not in self.paths:
-            self.paths.append(p); self.lb.insert("end", os.path.basename(p))
+        """Thêm 1 đường dẫn LOCAL từ NGOÀI (vd _apply_edit_data khi Sao chép thành phiếu mới) —
+        khác _add() ở chỗ không tự mở hộp thoại chọn file, chỉ nạp sẵn + tự giãn chiều cao."""
+        if not any(it["kind"] == "local" and it["path"] == p for it in self.items):
+            self.items.append({"kind": "local", "path": p})
+            self.lb.insert("end", self._label_for(self.items[-1]))
             self._resize()
 
+    def add_existing(self, attach_id, name, fetch_fn=None):
+        """Nạp sẵn 1 file ĐÃ CÓ trên server (lúc Sửa 1 phiếu cũ) — KHÔNG tải về máy, chỉ hiển
+        thị + nhớ attachId để giữ nguyên (mặc định) hoặc xoá (nếu người dùng bấm "Xoá file").
+        `fetch_fn(dest_path)`: callable (chạy trong THREAD NỀN khi người dùng bấm đúp để xem —
+        xem _view_existing) tải nội dung file về đúng `dest_path`; để trống nếu nơi gọi chưa hỗ
+        trợ xem (dòng đó vẫn hiển thị/giữ/xoá bình thường, chỉ không xem được)."""
+        if not attach_id:
+            return
+        # Luôn ép str(): draftDocumentId từ getAttachs.do (JSON) là int — cần str đồng nhất để
+        # sau này nối chuỗi ';' (append_kept_ids) không vỡ (đã gặp TypeError thật).
+        attach_id = str(attach_id)
+        if any(it["kind"] == "existing" and it["attach_id"] == attach_id for it in self.items):
+            return
+        self.items.append({"kind": "existing", "attach_id": attach_id,
+                            "name": name or "(không rõ tên)", "fetch_fn": fetch_fn})
+        self.lb.insert("end", self._label_for(self.items[-1]))
+        self._resize()
+
+    def _on_double_click(self, _event=None):
+        sel = list(self.lb.curselection())
+        if not sel:
+            return
+        item = self.items[sel[0]]
+        if item["kind"] == "local":
+            try:
+                open_file_with_default_app(item["path"])
+            except Exception as e:
+                messagebox.showerror("Không mở được file", str(e), parent=self)
+            return
+        fetch_fn = item.get("fetch_fn")
+        if not fetch_fn:
+            messagebox.showwarning("Chưa xem được",
+                                    "Thiếu thông tin để tải file này — thử lại từ đầu (Sửa lại phiếu).",
+                                    parent=self)
+            return
+        self._view_existing(item, fetch_fn)
+
+    def _view_existing(self, item, fetch_fn):
+        """Bấm đúp 1 dòng "existing" — tải vào thư mục tạm dùng-xong-bỏ rồi mở bằng app mặc
+        định máy, giống hệt cơ chế đã có ở ReportDetailWindow._open_attach: xem thuần tuý, KHÔNG
+        đụng gì tới luồng Lưu/Trình/xoá (fetch_fn chạy nền, không chặn giao diện)."""
+        name = item["name"]
+        dest = os.path.join(_new_gen_tmpdir("voffice_view_"), name)
+        dlg = _ConvertingDialog(self.winfo_toplevel(), f"Đang tải để xem: {name}…")
+
+        def worker():
+            try:
+                fetch_fn(dest)
+            except Exception as e:
+                self.after(0, lambda: (dlg.close(),
+                                        messagebox.showerror("Không tải được file", str(e), parent=self)))
+                return
+            def do_open():
+                dlg.close()
+                try:
+                    open_file_with_default_app(dest)
+                except Exception as e:
+                    messagebox.showerror("Không mở được file", str(e), parent=self)
+            self.after(0, do_open)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def get_local(self):
+        """Đường dẫn LOCAL cần upload (file mới thêm) — KHÔNG gồm file "existing" giữ nguyên."""
+        return [it["path"] for it in self.items if it["kind"] == "local"]
+
+    def get_kept_ids(self):
+        """attachId của các file "existing" người dùng KHÔNG xoá — giữ nguyên, không đụng tới."""
+        return [it["attach_id"] for it in self.items if it["kind"] == "existing"]
+
+    def get_removed_ids(self):
+        """attachId của các file "existing" bị bấm "Xoá file" — cần removeFile.do khi Chạy."""
+        return list(self._removed_ids)
+
     def get(self):
-        return list(self.paths)
+        """Tương thích ngược cho chỗ nào còn gọi .get() kiểu cũ — trả đúng get_local()."""
+        return self.get_local()
 
     def clear(self):
-        self.paths = []
+        self.items = []
+        self._removed_ids = []
         self.lb.delete(0, "end")
         self._resize()
 
@@ -2939,7 +3078,11 @@ class DocumentSection(ttk.LabelFrame):
             "code": self.code.get(),
             "abstract": self.abstract.get("1.0", "end-1c"),
             "file_draft_main": self.file_draft.get(),
-            "files_draft_extra": self.extra.get(),
+            "files_draft_extra": self.extra.get_local(),
+            # Tài liệu gửi kèm ĐÃ CÓ trên server, không đụng tới (giữ) hoặc bị bấm "Xoá file"
+            # (cần removeFile.do) — xem FileList/run_pipeline.
+            "_extra_kept_ids": self.extra.get_kept_ids(),
+            "_extra_removed_ids": self.extra.get_removed_ids(),
             "recv_inside": self.recip.get("inside"),
             "recv_report": self.recip.get("report"),
             "recv_edoc": self.recip.get("edoc"),
@@ -4564,7 +4707,11 @@ class App(tk.Tk):
             "work_profile_name": self.work_profile.get(),
             "auto_stamp": self.auto_stamp_var.get(),
             "file_report_main": self.file_report.get(),
-            "files_report_extra": self.extra_report.get(),
+            "files_report_extra": self.extra_report.get_local(),
+            # Tài liệu thêm CỦA PHIẾU TRÌNH đã có trên server, giữ nguyên hoặc bị "Xoá file"
+            # (xem FileList/run_pipeline — cùng cơ chế với văn bản, DocumentSection.get()).
+            "report_extra_kept_ids": self.extra_report.get_kept_ids(),
+            "report_extra_removed_ids": self.extra_report.get_removed_ids(),
             # "xin ý kiến" không có văn bản riêng (xem run_pipeline) — để rỗng cho khớp thực tế,
             # tránh PreviewWindow hiện nhầm 1 khung "Văn bản" trống (xem PreviewWindow._build_info).
             "documents": [] if report_mode == "xin_y_kien" else [ds.get() for ds in self.doc_sections],
@@ -5228,36 +5375,54 @@ class App(tk.Tk):
         dlg = _ConvertingDialog(self, f"Đang tải dữ liệu phiếu #{report_id} để {verb}…")
 
         def worker():
-            result = {"report_local": None, "extra_locals": [], "docs": [], "report_existing_attach_ids": [],
+            result = {"report_local": None, "extra_locals": [], "docs": [],
+                      "report_main_existing_id": None, "report_extra_existing": [],
                       "report_mode": "ban_hanh"}
             # 1. File của chính Phiếu trình (+ tài liệu thêm) — link kèm token đã có sẵn
             #    trong attachPathIcons của item (không cần API mới).
             hrefs = parse_report_attach_icons(item.get("attachPathIcons"))
             n_report_files = len(hrefs)
             for i, (href, title) in enumerate(hrefs):
-                self.after(0, lambda i=i, title=title: dlg.set_status(
-                    f"Đang tải file phiếu trình ({i+1}/{n_report_files}): {title}…"))
-                url = BASE + "/" + html_unescape(href)
                 m = re.search(r"attachId=(\d+)", href)
-                if m:
-                    # Nhớ lại ID file cũ của chính phiếu trình — xoá (removeFile.do) trước khi
-                    # lưu lại, cùng lý do/cơ chế như file của từng văn bản (xem
-                    # remove_attach_file/run_pipeline) — nếu không sẽ tích file trùng lặp y hệt.
-                    result["report_existing_attach_ids"].append(m.group(1))
-                # Thư mục con RIÊNG cho từng file (không đổi tên/thêm tiền tố) — tránh trùng tên
-                # nếu 2 file tình cờ cùng tên, vẫn giữ nguyên tên gốc thấy được trên form.
-                sub = os.path.join(tmpdir, f"phieu_trinh_{i}")
-                os.makedirs(sub, exist_ok=True)
-                dest = os.path.join(sub, title)
-                try:
-                    download_attach(s, url, dest, self.log)
-                    strip_view_watermark(dest, self._logged_user, self.log)
-                    if i == 0:
-                        result["report_local"] = dest
-                    else:
-                        result["extra_locals"].append(dest)
-                except Exception as e:
-                    self.log(f"   • Không tải được file phiếu trình '{title}': {e!r}")
+                attach_id = m.group(1) if m else None
+                # mode "copy" (Sao chép thành phiếu mới): phiếu MỚI không có gì để "giữ nguyên
+                # trên server" của phiếu gốc — vẫn phải tải hết về máy để upload thành file THẬT
+                # của phiếu mới (giữ đúng hành vi cũ, xem docstring _copy_in_compose).
+                if mode != "edit" or i == 0:
+                    self.after(0, lambda i=i, title=title: dlg.set_status(
+                        f"Đang tải file phiếu trình ({i+1}/{n_report_files}): {title}…"))
+                    url = BASE + "/" + html_unescape(href)
+                    # Thư mục con RIÊNG cho từng file (không đổi tên/thêm tiền tố) — tránh trùng
+                    # tên nếu 2 file tình cờ cùng tên, vẫn giữ nguyên tên gốc thấy được trên form.
+                    sub = os.path.join(tmpdir, f"phieu_trinh_{i}")
+                    os.makedirs(sub, exist_ok=True)
+                    dest = os.path.join(sub, title)
+                    try:
+                        download_attach(s, url, dest, self.log)
+                        strip_view_watermark(dest, self._logged_user, self.log)
+                        if i == 0:
+                            result["report_local"] = dest
+                            if mode == "edit":
+                                # File CHÍNH — vẫn tải về máy như trước (cần bản PDF cục bộ để
+                                # đóng dấu số ký lại + luôn là phần nội dung chính cần xem/kiểm
+                                # tra khi Sửa) — nhớ ID cũ để xoá (removeFile.do) trước khi lưu.
+                                result["report_main_existing_id"] = attach_id
+                        else:
+                            result["extra_locals"].append(dest)
+                    except Exception as e:
+                        self.log(f"   • Không tải được file phiếu trình '{title}': {e!r}")
+                elif attach_id:
+                    # mode "edit", tài liệu THÊM (i>0) — GIỮ NGUYÊN trên server, không tải về/
+                    # không upload lại trừ khi người dùng chủ động xoá/thêm ở khung "+ Tài liệu
+                    # thêm" (xem FileList.add_existing/_apply_edit_data) — đúng cơ chế web thật
+                    # (xác nhận qua HAR 'sửa nháp.har': file không đụng tới thì không hề có
+                    # removeFile.do/upload nào cả, khác hẳn 'thay file.har' lúc THẬT SỰ thay
+                    # file). Trước đây bước này luôn tải về máy — nếu tải lỗi (mạng chập chờn),
+                    # Chạy vẫn xoá ID cũ (xem code cũ) mà không có gì thay thế → mất file.
+                    # Vẫn giữ URL (đã có sẵn trong attachPathIcons, không tốn request nào) để
+                    # double-click xem được (xem FileList._view_existing/_apply_edit_data).
+                    result["report_extra_existing"].append(
+                        {"attach_id": attach_id, "name": title, "url": BASE + "/" + html_unescape(href)})
 
             # 2. Chi tiết từng văn bản (Loại VB/Số/Trích yếu/Nơi nhận/Khẩn-mật/Người ký).
             self.after(0, lambda: dlg.set_status("Đang tải danh sách văn bản…"))
@@ -5299,22 +5464,31 @@ class App(tk.Tk):
                     "existing_pid": pid,
                     "local_file": None,
                     "extra_locals": [],
-                    # ID file CŨ của văn bản này — cần xoá (removeFile.do) khi thật sự Lưu/Trình
-                    # lại, nếu không file mới upload lại sẽ CỘNG THÊM vào chứ không thay thế (xem
-                    # remove_attach_file / run_pipeline).
-                    "existing_attach_ids": [f["draftDocumentId"] for f in own_files if f.get("draftDocumentId")],
+                    "main_existing_id": None,
+                    # Tài liệu gửi kèm PHỤ đã có trên server, GIỮ NGUYÊN — chỉ điền khi mode
+                    # "edit" (xem nhánh else dưới); mode "copy" luôn tải về máy như cũ.
+                    "extra_existing": [],
                 }
                 main_file = next((a for a in own_files if a.get("documentAbstract")), None) or \
                     (own_files[0] if own_files else None)
                 if own_files:
-                    # Tải TOÀN BỘ file của văn bản này (không chỉ file chính) — trước đây chỉ
-                    # tải main_file nên các "Tài liệu gửi kèm" (vd 1 văn bản có nhiều file phụ,
-                    # xác nhận qua HAR có tới 6-7 file/văn bản) bị bỏ sót, không đưa vào lại
-                    # form Sửa.
                     tokens = fetch_draft_attach_tokens(s, pid, self.log)
                     for fi, f in enumerate(own_files):
-                        info = tokens.get(f.get("draftDocumentId"))
+                        aid = f.get("draftDocumentId")
                         name = f.get("draftDocumentName") or "file.pdf"
+                        is_main = f is main_file
+                        if mode == "edit" and not is_main:
+                            # GIỮ NGUYÊN trên server, không tải về/không upload lại trừ khi
+                            # người dùng chủ động xoá/thêm ở khung "+ Tài liệu gửi kèm" (xem
+                            # FileList.add_existing) — cùng lý do với nhánh phiếu trình phía
+                            # trên: trước đây luôn tải về máy, tải lỗi thì Chạy vẫn xoá ID cũ mà
+                            # không có gì thay thế → mất file phụ này vĩnh viễn.
+                            if aid:
+                                doc["extra_existing"].append({"attach_id": aid, "name": name})
+                            continue
+                        if is_main and aid:
+                            doc["main_existing_id"] = aid
+                        info = tokens.get(aid)
                         if not info:
                             self.log(f"   • Không tìm thấy token tải file '{name}' (publishDocumentId={pid}) "
                                      "— tự chọn lại file này trước khi bấm CHẠY.")
@@ -5324,11 +5498,11 @@ class App(tk.Tk):
                         sub = os.path.join(tmpdir, f"van_ban_{pid}_{fi}")
                         os.makedirs(sub, exist_ok=True)
                         dest = os.path.join(sub, name)
-                        url = f"{BASE}/uploadiframe!openFile.do?token={info['token']}&attachId={f['draftDocumentId']}"
+                        url = f"{BASE}/uploadiframe!openFile.do?token={info['token']}&attachId={aid}"
                         try:
                             download_attach(s, url, dest, self.log)
                             strip_view_watermark(dest, self._logged_user, self.log)
-                            if f is main_file:
+                            if is_main:
                                 doc["local_file"] = dest
                             else:
                                 doc["extra_locals"].append(dest)
@@ -5362,11 +5536,21 @@ class App(tk.Tk):
             self.file_report.set(result["report_local"])
         for p in result["extra_locals"]:
             self.extra_report.add_path(p)
-        # CHỈ giữ ID file cũ của phiếu trình khi thật sự SỬA (để run_pipeline xoá trước khi ghi
-        # đè) — mode "copy" luôn bỏ trống, phiếu mới không có gì "cũ" để xoá, và tuyệt đối không
-        # được đụng tới file của phiếu gốc (xem docstring _copy_in_compose).
+        # CHỈ giữ ID file CHÍNH cũ của phiếu trình khi thật sự SỬA (để run_pipeline xoá trước khi
+        # ghi đè) — mode "copy" luôn bỏ trống, phiếu mới không có gì "cũ" để xoá, và tuyệt đối
+        # không được đụng tới file của phiếu gốc (xem docstring _copy_in_compose). Tài liệu THÊM
+        # (extra) không nằm trong danh sách này nữa — nạp riêng bên dưới dạng "existing" (giữ
+        # nguyên, không tải/xoá/upload trừ khi người dùng chủ động bấm "Xoá file" — xem FileList).
         self._editing_report_existing_attach_ids = \
-            (result.get("report_existing_attach_ids") or []) if mode == "edit" else []
+            ([result["report_main_existing_id"]] if (mode == "edit" and result.get("report_main_existing_id"))
+             else [])
+        if mode == "edit":
+            for ex in result.get("report_extra_existing") or []:
+                # fetch_fn: double-click để xem (xem FileList._view_existing) — URL đã có sẵn
+                # từ lúc quét (attachPathIcons), không cần xin lại gì, chỉ tải khi thật sự xem.
+                self.extra_report.add_existing(
+                    ex["attach_id"], ex["name"],
+                    fetch_fn=lambda dest, url=ex["url"]: download_attach(self.session, url, dest, self.log))
 
         self.report_content.delete("1.0", "end")
         self.report_content.insert("1.0", item.get("content") or "")
@@ -5386,11 +5570,22 @@ class App(tk.Tk):
                 ds.extra.add_path(p)
             # CHỈ mang theo existing_pid/existing_attach_ids khi thật sự SỬA — mode "copy" luôn
             # để None/[] (mặc định của DocumentSection mới) dù `doc` (tải từ phiếu gốc) CÓ sẵn
-            # 2 giá trị này, để buộc save_document() tạo văn bản MỚI (onInsertDraft rỗng
+            # các giá trị này, để buộc save_document() tạo văn bản MỚI (onInsertDraft rỗng
             # publishDocumentId) thay vì tưởng đang sửa văn bản cũ rồi xoá mất file gốc.
             if mode == "edit":
                 ds._existing_pid = doc.get("existing_pid")
-                ds._existing_attach_ids = doc.get("existing_attach_ids") or []
+                # Chỉ còn ID file CHÍNH cũ ở đây (cần xoá trước khi ghi đè) — tài liệu gửi kèm
+                # PHỤ nạp riêng bên dưới dạng "existing" (giữ nguyên trừ khi bị bấm "Xoá file").
+                ds._existing_attach_ids = [doc["main_existing_id"]] if doc.get("main_existing_id") else []
+                pid = doc.get("existing_pid")
+                for ex in doc.get("extra_existing") or []:
+                    # fetch_fn: double-click để xem — xin TOKEN MỚI đúng lúc bấm xem (không giữ
+                    # token cũ từ lúc quét, dễ hết hạn nếu sửa lâu mới xem — xem
+                    # fetch_doc_existing_attach).
+                    ds.extra.add_existing(
+                        ex["attach_id"], ex["name"],
+                        fetch_fn=lambda dest, pid=pid, aid=ex["attach_id"]:
+                            fetch_doc_existing_attach(self.session, pid, aid, dest, self.log))
             # Nơi nhận là field CỦA TỪNG văn bản (receive_*) — điền thẳng vào ĐÚNG ds của văn
             # bản đó, không còn gộp (union) vào 1 rổ chung như trước (xem thảo luận HAR
             # "2 văn bản 2 nơi nhận trong cùng tờ trình").
